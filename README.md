@@ -15,7 +15,7 @@ from changing protocol architecture: borrow the envelope, avoid a mutable DOM,
 serialize responses directly, and use an exact schema-aware recognizer where
 the producer emits a canonical layout.
 
-Current status: pre-release. The crate passes differential/property tests,
+Current status: 0.1.0 release candidate. The crate passes differential/property tests,
 Rust 1.78, strict Clippy, rustdoc, packaging, Linux CI, and Windows CI. No
 production consumer has been switched yet.
 
@@ -31,20 +31,24 @@ A generated compact `tools/call` recognizer borrows three strings, parses a
 `u64` and a boolean, verifies complete consumption, and falls back to the
 strict order-independent parser on any mismatch.
 
-| Path | Median range | Compared with canonical `&str` |
+| Path | Median range | Speedup over typed `serde_json` |
 | --- | ---: | ---: |
-| `CanonicalScanner` over prevalidated `&str` | 56.24-74.61 ns | 1.00x |
-| `CanonicalScanner::from_slice` including UTF-8 validation | 66.30-94.02 ns | 1.10-1.26x slower |
-| strict order-independent `Cursor` | 295.31-421.29 ns | 5.26-5.65x slower |
-| typed `serde_json` derive | 368.26-554.43 ns | 6.55-7.43x slower |
+| `CanonicalBytesScanner` over ASCII canonical bytes | 45.94-50.47 ns | 7.35-7.62x |
+| `CanonicalScanner` over prevalidated `&str` | 47.63-51.81 ns | 7.03-7.43x |
+| strict order-independent `JsonCursor` | 261.82-284.37 ns | 1.31-1.35x |
+| typed `serde_json` derive | 342.85-384.78 ns | 1.00x |
 
-Both canonical paths allocate zero bytes. Even when UTF-8 validation is
-included, the measured advantage over typed `serde_json` remains 5.55-5.99x.
+Both canonical paths allocate zero bytes. The byte scanner avoids a complete
+UTF-8 pre-pass: it matches structural ASCII directly and validates captured
+ASCII strings while scanning. Across three paired runs it is slightly faster
+than the already-prevalidated `&str` path, so byte input no longer pays the
+previous 10-26% conversion penalty.
 
 This path intentionally accepts only its exact schema, field order, compact
-separators, and plain strings. Whitespace, reordered fields, escaped strings,
-or another schema are not treated as errors: they take the general parser
-fallback.
+separators, and plain strings. The fastest byte method
+`plain_ascii_string` rejects non-ASCII fields. Whitespace, reordered fields,
+escaped or non-ASCII strings, and another schema are not treated as errors:
+they take the strict `JsonCursor` fallback.
 
 ### MCP runtime architecture
 
@@ -224,14 +228,14 @@ assert_eq!(owned.get(), "[1,2,3]");
 
 ### Order-independent protocol cursor
 
-`Cursor` visits only routing fields, skips unknown values safely, and validates
+`JsonCursor` visits only routing fields, skips unknown values safely, and validates
 the complete document.
 
 ```rust
-use blazingly_json::Cursor;
+use blazingly_json::JsonCursor;
 
 let mut method = None;
-let mut cursor = Cursor::from_str(r#"{"jsonrpc":"2.0","method":"ping"}"#);
+let mut cursor = JsonCursor::from_str(r#"{"jsonrpc":"2.0","method":"ping"}"#);
 cursor.object(|request| {
     while let Some(field) = request.next_field()? {
         match field.name() {
@@ -268,7 +272,7 @@ let recognized = (|| {
 if let Some((method, limit)) = recognized {
     assert_eq!((method, limit), ("search", 20));
 } else {
-    // Parse with Cursor or from_str: the input may still be valid JSON.
+    // Parse with JsonCursor or from_str: the input may still be valid JSON.
 }
 ```
 
@@ -282,8 +286,8 @@ if let Some((method, limit)) = recognized {
 - access, mutation, indexing, JSON Pointer, and `take`;
 - validated borrowed `RawJson`;
 - drop-in-style borrowed/boxed `RawValue` and `to_raw_value`;
-- routing-oriented `Cursor`;
-- exact-layout `CanonicalScanner`;
+- routing-oriented `JsonCursor`;
+- exact-layout `CanonicalScanner` and `CanonicalBytesScanner`;
 - strict RFC 8259 parsing with recursion limits and source locations.
 
 Deliberate 0.1 exclusions:

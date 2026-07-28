@@ -1,4 +1,4 @@
-use blazingly_json::{Cursor, RawJson, Value};
+use blazingly_json::{JsonCursor, RawJson, Value};
 use std::borrow::Cow;
 
 #[test]
@@ -9,7 +9,7 @@ fn cursor_routes_nested_mcp_fields_without_a_dom() {
     let mut name = None;
     let mut arguments = None;
 
-    let mut cursor = Cursor::from_str(input);
+    let mut cursor = JsonCursor::from_str(input);
     cursor
         .object(|request| {
             while let Some(field) = request.next_field()? {
@@ -46,10 +46,10 @@ fn cursor_routes_nested_mcp_fields_without_a_dom() {
 
 #[test]
 fn cursor_validates_unvisited_fields_and_trailing_input() {
-    let mut malformed = Cursor::from_str(r#"{"wanted":1,"ignored":[1,]}"#);
+    let mut malformed = JsonCursor::from_str(r#"{"wanted":1,"ignored":[1,]}"#);
     assert!(malformed.object(|_| Ok(())).is_err());
 
-    let mut trailing = Cursor::from_str(r#"{"wanted":1} false"#);
+    let mut trailing = JsonCursor::from_str(r#"{"wanted":1} false"#);
     trailing.object(|_| Ok(())).unwrap();
     assert!(trailing.end().is_err());
 }

@@ -1,4 +1,4 @@
-use blazingly_json::{CanonicalScanner, Cursor, RawJson, Value};
+use blazingly_json::{CanonicalBytesScanner, CanonicalScanner, JsonCursor, RawJson, Value};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::hint::black_box;
@@ -71,6 +71,7 @@ const PING: &[u8] = br#"{"jsonrpc":"2.0","id":17,"method":"ping"}"#;
 const INITIALIZE: &[u8] = br#"{"jsonrpc":"2.0","id":"init-1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"Codex","version":"1.0"}}}"#;
 const TOOL_CALL: &[u8] = br#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}}"#;
 const TOOL_CALL_STR: &str = r#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}}"#;
+type CanonicalByteFields<'a> = (&'a [u8], &'a [u8], &'a [u8], u64, bool);
 
 fn dispatch_fast(input: &[u8]) {
     let request: FastRequest<'_> = blazingly_json::from_slice(input).unwrap();
@@ -95,7 +96,7 @@ fn dispatch_cursor(input: &[u8]) {
     let mut protocol_version = None;
     let mut name = None;
     let mut arguments = None;
-    let mut cursor = Cursor::from_slice(input);
+    let mut cursor = JsonCursor::from_slice(input);
     cursor
         .object(|request| {
             while let Some(field) = request.next_field()? {
@@ -189,7 +190,7 @@ fn dispatch_cursor_typed(input: &[u8]) {
     let mut query = None;
     let mut limit = None;
     let mut include_source = None;
-    let mut cursor = Cursor::from_slice(input);
+    let mut cursor = JsonCursor::from_slice(input);
     cursor
         .object(|request| {
             while let Some(field) = request.next_field()? {
@@ -260,6 +261,26 @@ fn recognize_canonical_tool(
         .then_some((id, name, query, limit, include_source))
 }
 
+#[inline]
+fn recognize_canonical_tool_bytes(
+    mut scanner: CanonicalBytesScanner<'_>,
+) -> Option<CanonicalByteFields<'_>> {
+    scanner.literal(r#"{"jsonrpc":"2.0","id":"#)?;
+    let id = scanner.plain_ascii_string()?;
+    scanner.literal(r#","method":"tools/call","params":{"name":"#)?;
+    let name = scanner.plain_ascii_string()?;
+    scanner.literal(r#","arguments":{"query":"#)?;
+    let query = scanner.plain_ascii_string()?;
+    scanner.literal(r#","limit":"#)?;
+    let limit = scanner.unsigned()?;
+    scanner.literal(r#","include_source":"#)?;
+    let include_source = scanner.boolean()?;
+    scanner.literal("}}}")?;
+    scanner
+        .is_finished()
+        .then_some((id, name, query, limit, include_source))
+}
+
 fn dispatch_canonical_typed(input: &str) -> bool {
     let Some(fields) = recognize_canonical_tool(CanonicalScanner::new(input)) else {
         dispatch_cursor_typed(input.as_bytes());
@@ -270,11 +291,7 @@ fn dispatch_canonical_typed(input: &str) -> bool {
 }
 
 fn dispatch_canonical_typed_bytes(input: &[u8]) -> bool {
-    let Some(scanner) = CanonicalScanner::from_slice(input) else {
-        dispatch_cursor_typed(input);
-        return false;
-    };
-    let Some(fields) = recognize_canonical_tool(scanner) else {
+    let Some(fields) = recognize_canonical_tool_bytes(CanonicalBytesScanner::new(input)) else {
         dispatch_cursor_typed(input);
         return false;
     };

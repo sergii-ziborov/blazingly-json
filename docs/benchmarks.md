@@ -64,7 +64,7 @@ Allocation measurements per request:
 | ping | 0 allocations / 0 bytes | 8 allocations / 670 bytes |
 | tools/call | 5 allocations / 668 bytes | 27 allocations / 2,702 bytes |
 
-`RawJson` remains the small sized wrapper used by `Cursor`. The compatible DST
+`RawJson` remains the small sized wrapper used by `JsonCursor`. The compatible DST
 surface is now provided separately by `blazingly_json::value::RawValue`.
 
 ## Compatible `RawValue`
@@ -98,27 +98,27 @@ retained 8 MiB after 18 reallocations.
 
 ## Canonical typed MCP path
 
-For a generated compact `tools/call` layout, `CanonicalScanner` recognizes the
-complete shape, borrows three strings, parses one `u64` and one boolean, and
-falls back to the strict `Cursor` on any mismatch. The `&str` path reuses UTF-8
-validation already performed by `mcport`'s line reader; the byte path validates
-the complete input once. Across consecutive 24-round runs:
+For a generated compact `tools/call` layout, the canonical scanners recognize
+the complete shape, borrow three fields, parse one `u64` and one boolean, and
+fall back to the strict `JsonCursor` on any mismatch. The `&str` path reuses
+UTF-8 validation already performed by a line reader. `CanonicalBytesScanner`
+matches structural ASCII directly and validates captured ASCII strings while
+scanning. Across three consecutive 24-round runs:
 
-| Path | Median range | Relative to canonical |
+| Path | Median range | Speedup over typed serde_json |
 | --- | ---: | ---: |
-| canonical typed recognizer, prevalidated `&str` | 56.24-74.61 ns | 1.00x |
-| canonical typed recognizer, validated bytes | 66.30-94.02 ns | 1.10-1.26x slower |
-| strict order-independent `Cursor` | 295.31-421.29 ns | 5.26-5.65x slower |
-| `serde_json` typed derive | 368.26-554.43 ns | 6.55-7.43x slower |
+| canonical byte recognizer with inline ASCII validation | 45.94-50.47 ns | 7.35-7.62x |
+| canonical typed recognizer, prevalidated `&str` | 47.63-51.81 ns | 7.03-7.43x |
+| strict order-independent `JsonCursor` | 261.82-284.37 ns | 1.31-1.35x |
+| `serde_json` typed derive | 342.85-384.78 ns | 1.00x |
 
-The canonical typed path performs zero allocations. This is the first parser
-result in the project that clears the 2-3x target, but its scope is deliberately
-narrow: exact field order, compact separators, plain strings, and a known
-schema. Whitespace, reordered fields, escapes, other valid JSON shapes, or
-unknown tool schemas take the strict fallback. This result is evidence for
-generated MCP tool codecs, not a claim that the general JSON parser is 5x
-faster than `serde_json`. Including one full UTF-8 validation for byte input,
-the measured advantage over typed `serde_json` remains 5.55-5.99x.
+Both canonical typed paths perform zero allocations and clear the 2-3x target.
+The new byte path also removes the former 10-26% full-input UTF-8 penalty. Its
+scope is deliberately narrow: exact field order, compact separators, plain
+strings, and a known schema. Whitespace, reordered fields, escapes, non-ASCII
+canonical identifiers, other valid JSON shapes, or unknown tool schemas take
+the strict fallback. This result is evidence for generated MCP tool codecs,
+not a claim that the general JSON parser is 7x faster than `serde_json`.
 
 ## mcport end to end
 
