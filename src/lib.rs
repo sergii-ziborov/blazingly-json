@@ -6,8 +6,9 @@ mod error;
 mod map;
 mod number;
 mod raw;
+mod raw_value;
 mod ser;
-mod value;
+pub mod value;
 mod value_de;
 
 pub use canonical::CanonicalScanner;
@@ -16,6 +17,7 @@ pub use error::{Error, Result};
 pub use map::Map;
 pub use number::Number;
 pub use raw::RawJson;
+pub use raw_value::{to_raw_value, RawValue};
 pub use ser::{
     to_string, to_string_pretty, to_value, to_vec, to_vec_pretty, to_writer, Serializer,
 };

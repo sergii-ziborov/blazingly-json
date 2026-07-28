@@ -66,6 +66,47 @@ Allocation measurements for request dispatch:
 | tools/call with owned arguments | 5 allocations / 668 bytes | 27 allocations / 2,702 bytes |
 | canonical typed tools/call | 0 allocations / 0 bytes | 27 allocations / 2,702 bytes |
 
+### `RawValue`
+
+`blazingly_json::value::RawValue` implements the common
+`serde_json::value::RawValue` contract: borrowed and boxed deserialization,
+verbatim serialization, `from_string`, `from_string_unchecked`, `get`,
+`into_string`, `to_raw_value`, constants, cloning, and direct deserialization
+from `&RawValue`.
+
+Three paired local runs after warm-up produced these ranges:
+
+| Workload | Speedup over `serde_json::RawValue` |
+| --- | ---: |
+| small MCP borrowed parse | 1.22-1.59x |
+| small MCP boxed parse | 1.21-1.59x |
+| small MCP `from_string` | 1.34-1.54x |
+| small MCP verbatim `to_vec` | 1.69-2.36x |
+| 1,000,000-number borrowed parse, 6.57 MiB | 1.42-1.79x |
+| 1,000,000-number boxed parse | 1.19-1.55x |
+| compact protocol-record array borrowed parse | 1.62-2.07x |
+| large preallocated writer output | approximately 1.00x |
+
+Large output is memory-bandwidth-bound and is reported as parity, not as a
+multiple-times win. For a complete raw document, `RawValue::to_vec` and
+`RawValue::write_to` bypass the generic Serde marker path. Embedded raw values
+remain compatible with ordinary `to_vec`, `to_writer`, and pretty output.
+
+Allocation measurements:
+
+| Operation | blazingly-json | serde_json |
+| --- | ---: | ---: |
+| small borrowed parse | 0 | 1 allocation / 8 bytes |
+| small boxed parse | 1 allocation / 154 bytes | 2 allocations / 162 bytes |
+| `from_string` with reusable capacity | 0 | 1 allocation / 8 bytes |
+| 1,000,000-number borrowed parse | 0 | 0 |
+| same payload as owned `Vec<u64>` in serde_json | - | 1 allocation + 18 reallocations / 8 MiB live |
+
+The raw parser first tries strict compact numeric-array and flat
+protocol-record recognizers. They must consume a complete value; whitespace,
+escaping, nesting, or any shape mismatch takes the fully validating general
+fallback.
+
 ### Compatible API and large payloads
 
 The compatible owned/typed path does not reach a multiple-times speedup:
@@ -147,6 +188,40 @@ let arguments = call.arguments.deserialize::<Value>()?;
 # Ok::<(), blazingly_json::Error>(())
 ```
 
+### Drop-in-style `RawValue`
+
+The type is available both at `blazingly_json::value::RawValue` and at the
+crate root.
+
+```rust
+use blazingly_json::value::{to_raw_value, RawValue};
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)]
+struct Input<'a> {
+    #[serde(borrow)]
+    payload: &'a RawValue,
+}
+
+#[derive(Serialize)]
+struct Output<'a> {
+    payload: &'a RawValue,
+}
+
+let input: Input<'_> =
+    blazingly_json::from_str(r#"{"payload": { "limit": 20 }}"#)?;
+assert_eq!(input.payload.get(), r#"{ "limit": 20 }"#);
+
+let output = blazingly_json::to_string(&Output {
+    payload: input.payload,
+})?;
+assert_eq!(output, r#"{"payload":{ "limit": 20 }}"#);
+
+let owned = to_raw_value(&[1, 2, 3])?;
+assert_eq!(owned.get(), "[1,2,3]");
+# Ok::<(), blazingly_json::Error>(())
+```
+
 ### Order-independent protocol cursor
 
 `Cursor` visits only routing fields, skips unknown values safely, and validates
@@ -206,6 +281,7 @@ if let Some((method, limit)) = recognized {
 - string, boolean, signed, unsigned, float, null, array, and object values;
 - access, mutation, indexing, JSON Pointer, and `take`;
 - validated borrowed `RawJson`;
+- drop-in-style borrowed/boxed `RawValue` and `to_raw_value`;
 - routing-oriented `Cursor`;
 - exact-layout `CanonicalScanner`;
 - strict RFC 8259 parsing with recursion limits and source locations.
@@ -216,14 +292,20 @@ Deliberate 0.1 exclusions:
 - JSON5, comments, trailing commas, NaN, and infinities;
 - `preserve_order`;
 - synchronous `Read`-based incremental parsing;
-- compatibility with private `serde_json` implementation details.
+- private `serde_json` implementation details other than the established
+  `RawValue` Serde token used for serializer interoperability.
 
 ## Dependencies and safety
 
 The runtime dependencies are `serde`, `memchr`, `itoa`, `lexical-core`, and
 `zmij`. `serde_json` is a development-only oracle for differential tests and
-benchmarks. Tokio, Hyper, Axum, and unsafe code are absent; `unsafe_code` is
-forbidden at the crate level.
+benchmarks. Tokio, Hyper, and Axum are absent.
+
+`unsafe_code` is denied crate-wide. The sole exception is `raw_value.rs`,
+which contains three documented `repr(transparent)` DST conversions between
+`str` and `RawValue`. No parser, scanner, serializer, or other module may use
+unsafe code. The optional `from_string_unchecked` API is itself unsafe and
+states the same validity invariant as the serde_json API it replaces.
 
 ## Competitive position
 
@@ -236,8 +318,9 @@ forbidden at the crate level.
 - `jiter`: iterator/schema-oriented parsing plus Serde support.
 
 `blazingly-json` does not claim to beat every engine on every document. Its
-target is safe, portable, low-MSRV protocol performance and generated
-schema-aware MCP/API codecs with a strict fallback.
+target is portable, low-MSRV protocol performance, a tiny auditable unsafe
+island for `RawValue`, and generated schema-aware MCP/API codecs with a strict
+fallback.
 
 See:
 
@@ -263,6 +346,8 @@ cargo bench --bench allocation_comparison
 cargo bench --bench mcp_fast_path
 cargo bench --bench mcp_allocations
 cargo bench --bench mcport_end_to_end
+cargo bench --bench raw_value_comparison
+cargo bench --bench raw_value_allocations
 ```
 
 ## License

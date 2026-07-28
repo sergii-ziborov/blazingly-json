@@ -1,3 +1,4 @@
+use crate::raw_value::RAW_VALUE_TOKEN;
 use crate::{Error, Map, Number, Result, Value};
 use serde::ser::{
     self, Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant,
@@ -210,6 +211,20 @@ impl<W: Write, F: Formatter> Serializer<W, F> {
     }
 }
 
+#[inline]
+fn initial_capacity<T: ?Sized>(value: &T, minimum: usize) -> usize {
+    if std::mem::size_of::<&T>() > std::mem::size_of::<usize>() {
+        let size = std::mem::size_of_val(value).saturating_add(2);
+        if size <= 4_096 {
+            size.max(minimum)
+        } else {
+            minimum
+        }
+    } else {
+        minimum
+    }
+}
+
 /// Serializes a value into a compact byte vector.
 ///
 /// # Errors
@@ -217,7 +232,7 @@ impl<W: Write, F: Formatter> Serializer<W, F> {
 /// Returns an error when `value` cannot be represented as supported JSON.
 #[inline]
 pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    let mut serializer = Serializer::new(VecWriter::with_capacity(128));
+    let mut serializer = Serializer::new(VecWriter::with_capacity(initial_capacity(value, 128)));
     value.serialize(&mut serializer)?;
     Ok(serializer.into_inner().bytes)
 }
@@ -239,7 +254,7 @@ pub fn to_string<T: Serialize + ?Sized>(value: &T) -> Result<String> {
 ///
 /// Returns an error when `value` cannot be represented as supported JSON.
 pub fn to_vec_pretty<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    let mut serializer = Serializer::pretty(VecWriter::with_capacity(256));
+    let mut serializer = Serializer::pretty(VecWriter::with_capacity(initial_capacity(value, 256)));
     value.serialize(&mut serializer)?;
     Ok(serializer.into_inner().bytes)
 }
@@ -448,8 +463,12 @@ impl<'a, W: Write, F: Formatter> ser::Serializer for &'a mut Serializer<W, F> {
     }
 
     #[inline]
-    fn serialize_struct(self, _name: &'static str, length: usize) -> Result<Self::SerializeStruct> {
-        self.serialize_map(Some(length))
+    fn serialize_struct(self, name: &'static str, length: usize) -> Result<Self::SerializeStruct> {
+        if name == RAW_VALUE_TOKEN {
+            Ok(Compound::raw(self))
+        } else {
+            self.serialize_map(Some(length))
+        }
     }
 
     fn serialize_struct_variant(
@@ -476,10 +495,11 @@ impl<'a, W: Write, F: Formatter> ser::Serializer for &'a mut Serializer<W, F> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Array,
     Object,
+    RawValue,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -524,7 +544,21 @@ impl<'a, W: Write, F: Formatter> Compound<'a, W, F> {
     }
 
     #[inline]
+    fn raw(serializer: &'a mut Serializer<W, F>) -> Self {
+        Self {
+            serializer,
+            kind: Kind::RawValue,
+            state: CompoundState::Empty,
+            wrapper: Wrapper::None,
+            _length: Some(1),
+        }
+    }
+
+    #[inline]
     fn separator(&mut self) -> Result<()> {
+        if self.kind == Kind::RawValue {
+            return Err(invalid_raw_value());
+        }
         if self.state != CompoundState::Empty {
             self.serializer.write(b",")?;
         }
@@ -544,6 +578,13 @@ impl<'a, W: Write, F: Formatter> Compound<'a, W, F> {
 
     #[inline]
     fn finish(self) -> Result<()> {
+        if self.kind == Kind::RawValue {
+            return if self.state == CompoundState::Complete {
+                Ok(())
+            } else {
+                Err(invalid_raw_value())
+            };
+        }
         if self.state == CompoundState::KeyPending {
             return Err(Error::message("map key has no value"));
         }
@@ -554,6 +595,7 @@ impl<'a, W: Write, F: Formatter> Compound<'a, W, F> {
         self.serializer.write(match self.kind {
             Kind::Array => b"]",
             Kind::Object => b"}",
+            Kind::RawValue => unreachable!("raw value handled before delimiter"),
         })?;
         if matches!(self.wrapper, Wrapper::Object) {
             self.serializer.depth -= 1;
@@ -657,6 +699,16 @@ impl<W: Write, F: Formatter> SerializeStruct for Compound<'_, W, F> {
         key: &'static str,
         value: &T,
     ) -> Result<()> {
+        if self.kind == Kind::RawValue {
+            if key != RAW_VALUE_TOKEN || self.state != CompoundState::Empty {
+                return Err(invalid_raw_value());
+            }
+            value.serialize(RawValueStrEmitter {
+                serializer: &mut *self.serializer,
+            })?;
+            self.state = CompoundState::Complete;
+            return Ok(());
+        }
         self.key(key)?;
         self.state = CompoundState::Complete;
         value.serialize(&mut *self.serializer)
@@ -681,6 +733,158 @@ impl<W: Write, F: Formatter> SerializeStructVariant for Compound<'_, W, F> {
 
     fn end(self) -> Result<()> {
         self.finish()
+    }
+}
+
+#[inline]
+fn invalid_raw_value() -> Error {
+    Error::message("invalid RawValue serialization")
+}
+
+struct RawValueStrEmitter<'a, W, F> {
+    serializer: &'a mut Serializer<W, F>,
+}
+
+macro_rules! reject_raw_value_scalars {
+    ($($method:ident($type:ty)),+ $(,)?) => {
+        $(
+            fn $method(self, _value: $type) -> Result<()> {
+                Err(invalid_raw_value())
+            }
+        )+
+    };
+}
+
+impl<W: Write, F: Formatter> ser::Serializer for RawValueStrEmitter<'_, W, F> {
+    type Ok = ();
+    type Error = Error;
+    type SerializeSeq = Impossible<(), Error>;
+    type SerializeTuple = Impossible<(), Error>;
+    type SerializeTupleStruct = Impossible<(), Error>;
+    type SerializeTupleVariant = Impossible<(), Error>;
+    type SerializeMap = Impossible<(), Error>;
+    type SerializeStruct = Impossible<(), Error>;
+    type SerializeStructVariant = Impossible<(), Error>;
+
+    reject_raw_value_scalars!(
+        serialize_bool(bool),
+        serialize_i8(i8),
+        serialize_i16(i16),
+        serialize_i32(i32),
+        serialize_i64(i64),
+        serialize_i128(i128),
+        serialize_u8(u8),
+        serialize_u16(u16),
+        serialize_u32(u32),
+        serialize_u64(u64),
+        serialize_u128(u128),
+        serialize_f32(f32),
+        serialize_f64(f64),
+        serialize_char(char)
+    );
+
+    #[inline]
+    fn serialize_str(self, value: &str) -> Result<()> {
+        self.serializer.write(value.as_bytes())
+    }
+
+    fn serialize_bytes(self, _value: &[u8]) -> Result<()> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_none(self) -> Result<()> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_some<T: Serialize + ?Sized>(self, _value: &T) -> Result<()> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_unit(self) -> Result<()> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_unit_struct(self, _name: &'static str) -> Result<()> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+    ) -> Result<()> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_newtype_struct<T: Serialize + ?Sized>(
+        self,
+        _name: &'static str,
+        _value: &T,
+    ) -> Result<()> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_newtype_variant<T: Serialize + ?Sized>(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _value: &T,
+    ) -> Result<()> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_seq(self, _length: Option<usize>) -> Result<Self::SerializeSeq> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_tuple(self, _length: usize) -> Result<Self::SerializeTuple> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        _length: usize,
+    ) -> Result<Self::SerializeTupleStruct> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _length: usize,
+    ) -> Result<Self::SerializeTupleVariant> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_map(self, _length: Option<usize>) -> Result<Self::SerializeMap> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        _length: usize,
+    ) -> Result<Self::SerializeStruct> {
+        Err(invalid_raw_value())
+    }
+
+    fn serialize_struct_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _length: usize,
+    ) -> Result<Self::SerializeStructVariant> {
+        Err(invalid_raw_value())
+    }
+
+    fn collect_str<T: fmt::Display + ?Sized>(self, _value: &T) -> Result<()> {
+        Err(invalid_raw_value())
     }
 }
 
@@ -1163,8 +1367,12 @@ impl ser::Serializer for ValueSerializer {
         Ok(ValueCompound::object(None))
     }
 
-    fn serialize_struct(self, _name: &'static str, _length: usize) -> Result<ValueCompound> {
-        Ok(ValueCompound::object(None))
+    fn serialize_struct(self, name: &'static str, _length: usize) -> Result<ValueCompound> {
+        if name == RAW_VALUE_TOKEN {
+            Ok(ValueCompound::raw())
+        } else {
+            Ok(ValueCompound::object(None))
+        }
     }
 
     fn serialize_struct_variant(
@@ -1185,6 +1393,7 @@ impl ser::Serializer for ValueSerializer {
 enum ValueCompoundKind {
     Array(Vec<Value>),
     Object(Map<String, Value>),
+    RawValue(Option<Value>),
 }
 
 struct ValueCompound {
@@ -1210,6 +1419,14 @@ impl ValueCompound {
         }
     }
 
+    fn raw() -> Self {
+        Self {
+            kind: ValueCompoundKind::RawValue(None),
+            pending_key: None,
+            variant: None,
+        }
+    }
+
     fn push<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
         match &mut self.kind {
             ValueCompoundKind::Array(values) => {
@@ -1217,6 +1434,7 @@ impl ValueCompound {
                 Ok(())
             }
             ValueCompoundKind::Object(_) => Err(Error::message("expected an array")),
+            ValueCompoundKind::RawValue(_) => Err(invalid_raw_value()),
         }
     }
 
@@ -1227,6 +1445,7 @@ impl ValueCompound {
                 Ok(())
             }
             ValueCompoundKind::Array(_) => Err(Error::message("expected an object")),
+            ValueCompoundKind::RawValue(_) => Err(invalid_raw_value()),
         }
     }
 
@@ -1237,6 +1456,9 @@ impl ValueCompound {
         let value = match self.kind {
             ValueCompoundKind::Array(values) => Value::Array(values),
             ValueCompoundKind::Object(values) => Value::Object(values),
+            ValueCompoundKind::RawValue(value) => {
+                return value.ok_or_else(invalid_raw_value);
+            }
         };
         if let Some(variant) = self.variant {
             Ok(Value::Object(Map::from([(variant, value)])))
@@ -1332,7 +1554,20 @@ impl SerializeStruct for ValueCompound {
         key: &'static str,
         value: &T,
     ) -> Result<()> {
-        self.insert(key.to_owned(), value)
+        match &mut self.kind {
+            ValueCompoundKind::RawValue(output) => {
+                if key != RAW_VALUE_TOKEN || output.is_some() {
+                    return Err(invalid_raw_value());
+                }
+                let serialized = value.serialize(ValueSerializer)?;
+                let Value::String(raw) = serialized else {
+                    return Err(invalid_raw_value());
+                };
+                *output = Some(crate::from_str(&raw)?);
+                Ok(())
+            }
+            _ => self.insert(key.to_owned(), value),
+        }
     }
 
     fn end(self) -> Result<Value> {

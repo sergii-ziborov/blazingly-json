@@ -1,5 +1,7 @@
 use crate::raw::RAW_JSON_TOKEN;
+use crate::raw_value::RAW_VALUE_TOKEN;
 use crate::{Error, Result};
+use serde::de::value::BorrowedStrDeserializer;
 use serde::de::{
     self, DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, SeqAccess, VariantAccess,
     Visitor,
@@ -13,6 +15,181 @@ const MAX_DEPTH: usize = 128;
 const STRING_WORD_BYTES: usize = std::mem::size_of::<u64>();
 const ONE_BYTES: u64 = u64::MAX / 255;
 const HIGH_BYTES: u64 = ONE_BYTES << 7;
+
+#[inline]
+fn compact_number_end(bytes: &[u8], mut index: usize) -> Option<usize> {
+    if bytes.get(index) == Some(&b'-') {
+        index += 1;
+    }
+
+    match bytes.get(index).copied()? {
+        b'0' => {
+            index += 1;
+            if bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                return None;
+            }
+        }
+        b'1'..=b'9' => {
+            index += 1;
+            while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                index += 1;
+            }
+        }
+        _ => return None,
+    }
+
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let fraction_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == fraction_start {
+            return None;
+        }
+    }
+
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let exponent_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == exponent_start {
+            return None;
+        }
+    }
+
+    Some(index)
+}
+
+#[inline]
+fn compact_number_array_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start;
+    if bytes.get(index) != Some(&b'[') {
+        return None;
+    }
+    index += 1;
+    if bytes.get(index) == Some(&b']') {
+        return Some(index + 1);
+    }
+
+    loop {
+        index = compact_number_end(bytes, index)?;
+        match bytes.get(index) {
+            Some(b',') => index += 1,
+            Some(b']') => return Some(index + 1),
+            _ => return None,
+        }
+    }
+}
+
+#[inline]
+fn compact_plain_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'"') {
+        return None;
+    }
+    let content_start = start + 1;
+    let special = content_start + find_string_special(&bytes[content_start..])?;
+    (bytes[special] == b'"').then_some(special + 1)
+}
+
+#[inline]
+fn compact_scalar_end(bytes: &[u8], start: usize) -> Option<usize> {
+    match bytes.get(start).copied()? {
+        b'"' => compact_plain_string_end(bytes, start),
+        b'-' | b'0'..=b'9' => compact_number_end(bytes, start),
+        b't' if bytes.get(start..start + 4) == Some(b"true") => Some(start + 4),
+        b'f' if bytes.get(start..start + 5) == Some(b"false") => Some(start + 5),
+        b'n' if bytes.get(start..start + 4) == Some(b"null") => Some(start + 4),
+        _ => None,
+    }
+}
+
+#[inline]
+fn compact_flat_object_array_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start..start + 2) == Some(b"[]") {
+        return Some(start + 2);
+    }
+    if bytes.get(start..start + 2) != Some(b"[{") {
+        return None;
+    }
+
+    let mut index = start + 2;
+    loop {
+        if bytes.get(index) != Some(&b'}') {
+            loop {
+                index = compact_plain_string_end(bytes, index)?;
+                if bytes.get(index) != Some(&b':') {
+                    return None;
+                }
+                index = compact_scalar_end(bytes, index + 1)?;
+                match bytes.get(index) {
+                    Some(b',') => index += 1,
+                    Some(b'}') => break,
+                    _ => return None,
+                }
+            }
+        }
+
+        index += 1;
+        match bytes.get(index) {
+            Some(b',') if bytes.get(index + 1) == Some(&b'{') => index += 2,
+            Some(b']') => return Some(index + 1),
+            _ => return None,
+        }
+    }
+}
+
+struct BorrowedRawMap<'de> {
+    raw: Option<&'de str>,
+    key_emitted: bool,
+}
+
+impl<'de> BorrowedRawMap<'de> {
+    #[inline]
+    const fn new(raw: &'de str) -> Self {
+        Self {
+            raw: Some(raw),
+            key_emitted: false,
+        }
+    }
+}
+
+impl<'de> MapAccess<'de> for BorrowedRawMap<'de> {
+    type Error = Error;
+
+    #[inline]
+    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>>
+    where
+        K: DeserializeSeed<'de>,
+    {
+        if self.raw.is_none() || self.key_emitted {
+            return Ok(None);
+        }
+        self.key_emitted = true;
+        seed.deserialize(BorrowedStrDeserializer::<Error>::new(RAW_VALUE_TOKEN))
+            .map(Some)
+    }
+
+    #[inline]
+    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value>
+    where
+        V: DeserializeSeed<'de>,
+    {
+        if !self.key_emitted {
+            return Err(Error::message("raw value requested before its marker"));
+        }
+        let raw = self
+            .raw
+            .take()
+            .ok_or_else(|| Error::message("raw value was already consumed"))?;
+        seed.deserialize(BorrowedStrDeserializer::<Error>::new(raw))
+    }
+}
 
 #[inline]
 fn find_string_special(bytes: &[u8]) -> Option<usize> {
@@ -463,13 +640,11 @@ impl<'de> Deserializer<'de> {
     }
 
     #[inline]
-    fn skip_string(&mut self) -> Result<()> {
-        self.skip_whitespace();
+    fn skip_string_at(&mut self) -> Result<()> {
         if self.input.get(self.index) != Some(&b'"') {
             return Err(self.error("expected a string"));
         }
         self.index += 1;
-        self.utf8_source()?;
 
         loop {
             let Some(relative) = find_string_special(&self.input[self.index..]) else {
@@ -519,32 +694,56 @@ impl<'de> Deserializer<'de> {
 
     #[inline]
     fn skip_value(&mut self) -> Result<()> {
-        match self.peek() {
-            Some(b'n') => self.parse_literal(b"null"),
-            Some(b't') => self.parse_literal(b"true"),
-            Some(b'f') => self.parse_literal(b"false"),
-            Some(b'"') => self.skip_string(),
-            Some(b'-' | b'0'..=b'9') => self.parse_number().map(|_| ()),
-            Some(b'[') => self.skip_array(),
-            Some(b'{') => self.skip_object(),
+        self.utf8_source()?;
+        self.skip_whitespace();
+        self.skip_value_at()
+    }
+
+    #[inline]
+    fn skip_value_at(&mut self) -> Result<()> {
+        match self.input.get(self.index).copied() {
+            Some(b'n') => self.skip_literal_at(b"null"),
+            Some(b't') => self.skip_literal_at(b"true"),
+            Some(b'f') => self.skip_literal_at(b"false"),
+            Some(b'"') => self.skip_string_at(),
+            Some(b'-' | b'0'..=b'9') => self.skip_number(),
+            Some(b'[') => self.skip_array_at(),
+            Some(b'{') => self.skip_object_at(),
             Some(_) => Err(self.error("expected a JSON value")),
             None => Err(self.error("unexpected end of input")),
         }
     }
 
     #[inline]
-    fn skip_array(&mut self) -> Result<()> {
-        self.expect_byte(b'[')?;
+    fn skip_literal_at(&mut self, literal: &[u8]) -> Result<()> {
+        let end = self.index.saturating_add(literal.len());
+        if self.input.get(self.index..end) == Some(literal) {
+            self.index = end;
+            Ok(())
+        } else {
+            Err(self.error("expected JSON literal"))
+        }
+    }
+
+    #[inline]
+    fn skip_array_at(&mut self) -> Result<()> {
+        debug_assert_eq!(self.input.get(self.index), Some(&b'['));
+        self.index += 1;
         self.enter()?;
         let result = (|| {
-            if self.peek() == Some(b']') {
+            self.skip_whitespace();
+            if self.input.get(self.index) == Some(&b']') {
                 self.index += 1;
                 return Ok(());
             }
             loop {
-                self.skip_value()?;
-                match self.peek() {
-                    Some(b',') => self.index += 1,
+                self.skip_value_at()?;
+                self.skip_whitespace();
+                match self.input.get(self.index) {
+                    Some(b',') => {
+                        self.index += 1;
+                        self.skip_whitespace();
+                    }
                     Some(b']') => {
                         self.index += 1;
                         return Ok(());
@@ -558,20 +757,31 @@ impl<'de> Deserializer<'de> {
     }
 
     #[inline]
-    fn skip_object(&mut self) -> Result<()> {
-        self.expect_byte(b'{')?;
+    fn skip_object_at(&mut self) -> Result<()> {
+        debug_assert_eq!(self.input.get(self.index), Some(&b'{'));
+        self.index += 1;
         self.enter()?;
         let result = (|| {
-            if self.peek() == Some(b'}') {
+            self.skip_whitespace();
+            if self.input.get(self.index) == Some(&b'}') {
                 self.index += 1;
                 return Ok(());
             }
             loop {
-                self.skip_string()?;
-                self.expect_byte(b':')?;
-                self.skip_value()?;
-                match self.peek() {
-                    Some(b',') => self.index += 1,
+                self.skip_string_at()?;
+                self.skip_whitespace();
+                if self.input.get(self.index) != Some(&b':') {
+                    return Err(self.error("expected `:`"));
+                }
+                self.index += 1;
+                self.skip_whitespace();
+                self.skip_value_at()?;
+                self.skip_whitespace();
+                match self.input.get(self.index) {
+                    Some(b',') => {
+                        self.index += 1;
+                        self.skip_whitespace();
+                    }
                     Some(b'}') => {
                         self.index += 1;
                         return Ok(());
@@ -586,11 +796,80 @@ impl<'de> Deserializer<'de> {
 
     #[inline]
     fn capture_raw(&mut self) -> Result<&'de str> {
+        self.utf8_source()?;
         self.skip_whitespace();
         let start = self.index;
-        self.skip_value()?;
-        str::from_utf8(&self.input[start..self.index])
-            .map_err(|_| self.error("input is not valid UTF-8"))
+        if let Some(end) = compact_number_array_end(self.input, start)
+            .or_else(|| compact_flat_object_array_end(self.input, start))
+        {
+            self.index = end;
+        } else {
+            self.skip_value_at()?;
+        }
+        let source = self
+            .source
+            .expect("capture_raw validates or receives UTF-8 input");
+        Ok(&source[start..self.index])
+    }
+
+    #[inline]
+    fn skip_number(&mut self) -> Result<()> {
+        let bytes = self.input;
+        let mut index = self.index;
+
+        if bytes.get(index) == Some(&b'-') {
+            index += 1;
+        }
+
+        match bytes.get(index).copied() {
+            Some(b'0') => {
+                index += 1;
+                if bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                    self.index = index;
+                    return Err(self.error("leading zero in number"));
+                }
+            }
+            Some(b'1'..=b'9') => {
+                index += 1;
+                while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                    index += 1;
+                }
+            }
+            _ => {
+                self.index = index;
+                return Err(self.error("invalid number"));
+            }
+        }
+
+        if bytes.get(index) == Some(&b'.') {
+            index += 1;
+            let fraction_start = index;
+            while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                index += 1;
+            }
+            if index == fraction_start {
+                self.index = index;
+                return Err(self.error("fraction has no digits"));
+            }
+        }
+
+        if matches!(bytes.get(index), Some(b'e' | b'E')) {
+            index += 1;
+            if matches!(bytes.get(index), Some(b'+' | b'-')) {
+                index += 1;
+            }
+            let exponent_start = index;
+            while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                index += 1;
+            }
+            if index == exponent_start {
+                self.index = index;
+                return Err(self.error("exponent has no digits"));
+            }
+        }
+
+        self.index = index;
+        Ok(())
     }
 
     fn parse_hex_quad(&mut self) -> Result<u16> {
@@ -1089,6 +1368,9 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     ) -> Result<V::Value> {
         if name == RAW_JSON_TOKEN {
             visitor.visit_borrowed_str(self.capture_raw()?)
+        } else if name == RAW_VALUE_TOKEN {
+            let raw = self.capture_raw()?;
+            visitor.visit_map(BorrowedRawMap::new(raw))
         } else {
             visitor.visit_newtype_struct(self)
         }
