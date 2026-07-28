@@ -22,6 +22,8 @@ modified by this work.
   `to_value`;
 - borrowed, validated raw sub-values for routing an MCP/JSON-RPC envelope
   without constructing a complete mutable DOM;
+- `serde_json::value::RawValue`-style borrowed and boxed values, verbatim
+  serialization, owned-string reuse, and `to_raw_value`;
 - an allocation-free recognizer primitive for generated canonical layouts,
   where any mismatch falls back to the general parser;
 - a slice deserializer usable by `serde_path_to_error`;
@@ -36,7 +38,8 @@ modified by this work.
 - JSON5, comments, trailing commas, NaN, and infinities;
 - `preserve_order`;
 - synchronous `Read`-based incremental parsing;
-- direct compatibility with every private `serde_json` implementation detail.
+- direct compatibility with every private `serde_json` implementation detail
+  other than the established RawValue Serde marker.
 
 An excluded feature is added only after a real consumer call site or a measured
 hot path justifies it.

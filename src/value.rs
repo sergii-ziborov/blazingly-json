@@ -5,6 +5,8 @@ use std::fmt;
 use std::mem;
 use std::ops::{Index, IndexMut};
 
+pub use crate::raw_value::{to_raw_value, RawValue};
+
 /// An owned JSON value.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Value {

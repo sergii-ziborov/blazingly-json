@@ -52,8 +52,16 @@ harness = false
 name = "mcport_end_to_end"
 harness = false
 
+[[bench]]
+name = "raw_value_comparison"
+harness = false
+
+[[bench]]
+name = "raw_value_allocations"
+harness = false
+
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }

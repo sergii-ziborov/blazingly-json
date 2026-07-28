@@ -64,11 +64,37 @@ Allocation measurements per request:
 | ping | 0 allocations / 0 bytes | 8 allocations / 670 bytes |
 | tools/call | 5 allocations / 668 bytes | 27 allocations / 2,702 bytes |
 
-The envelope-only `serde_json::RawValue` implementation remains 4-6% faster
-than the current `RawJson` implementation in this same harness. The 3-6x
-product gain therefore comes from the low-allocation protocol design and
-direct response serialization, not from claiming that every primitive parser
-operation beats every competitor.
+`RawJson` remains the small sized wrapper used by `Cursor`. The compatible DST
+surface is now provided separately by `blazingly_json::value::RawValue`.
+
+## Compatible `RawValue`
+
+The paired `raw_value_comparison` harness compares the same borrowed, boxed,
+owned-string, and verbatim-output operations with
+`serde_json::value::RawValue`. Three consecutive local runs produced:
+
+| Workload | Speedup range |
+| --- | ---: |
+| small MCP borrowed parse | 1.22-1.59x |
+| small MCP boxed parse | 1.21-1.59x |
+| small MCP `from_string` | 1.34-1.54x |
+| small MCP verbatim `to_vec` | 1.69-2.36x |
+| 1,000,000-number borrowed parse | 1.42-1.79x |
+| 1,000,000-number boxed parse | 1.19-1.55x |
+| compact flat protocol-record array | 1.62-2.07x |
+| large preallocated writer output | approximately 1.00x |
+
+The parser uses strict recognizers for compact number arrays and compact flat
+protocol records. Any mismatch takes the fully validating general parser.
+Large raw serialization is a memory copy and remains bandwidth-bound.
+
+The allocation harness reports zero allocations for borrowed parsing, one
+exact-size allocation for boxed parsing, and zero allocations when
+`from_string` can reuse its input buffer. On the same machine serde_json used
+one additional temporary 8-byte allocation on the measured small raw paths.
+Both borrowed implementations used zero allocations for the 6.57 MiB
+million-number payload. Materializing that payload as `Vec<u64>` instead
+retained 8 MiB after 18 reallocations.
 
 ## Canonical typed MCP path
 
@@ -137,4 +163,6 @@ cargo bench --bench large_payload
 cargo bench --bench allocation_comparison
 cargo bench --bench mcp_fast_path
 cargo bench --bench mcp_allocations
+cargo bench --bench raw_value_comparison
+cargo bench --bench raw_value_allocations
 ```
