@@ -104,5 +104,14 @@ impl From<io::Error> for Error {
     }
 }
 
+impl From<Error> for io::Error {
+    fn from(error: Error) -> Self {
+        match error.kind {
+            ErrorKind::Io(error) => error,
+            ErrorKind::Message(message) => Self::new(io::ErrorKind::InvalidData, message),
+        }
+    }
+}
+
 /// Result alias used by this crate.
 pub type Result<T> = std::result::Result<T, Error>;

@@ -119,7 +119,7 @@ impl Value {
         }
     }
 
-    pub const fn as_array_mut(&mut self) -> Option<&mut Vec<Self>> {
+    pub fn as_array_mut(&mut self) -> Option<&mut Vec<Self>> {
         match self {
             Self::Array(value) => Some(value),
             _ => None,
@@ -134,7 +134,7 @@ impl Value {
         }
     }
 
-    pub const fn as_object_mut(&mut self) -> Option<&mut Map<String, Self>> {
+    pub fn as_object_mut(&mut self) -> Option<&mut Map<String, Self>> {
         match self {
             Self::Object(value) => Some(value),
             _ => None,
@@ -487,9 +487,7 @@ macro_rules! partial_eq_value {
     };
 }
 
-partial_eq_value!(
-    bool, i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64
-);
+partial_eq_value!(bool, i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64);
 
 impl PartialEq<str> for Value {
     fn eq(&self, other: &str) -> bool {

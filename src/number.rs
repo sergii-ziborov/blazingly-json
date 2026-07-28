@@ -81,7 +81,7 @@ impl fmt::Display for Number {
         match self.0 {
             Repr::I64(value) => value.fmt(formatter),
             Repr::U64(value) => value.fmt(formatter),
-            Repr::F64(value) => formatter.write_str(ryu::Buffer::new().format_finite(value)),
+            Repr::F64(value) => formatter.write_str(zmij::Buffer::new().format_finite(value)),
         }
     }
 }

@@ -1,9 +1,9 @@
 use crate::{Error, Map, Number, Result, Value};
-use serde::Serialize;
 use serde::ser::{
     self, Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant,
     SerializeTuple, SerializeTupleStruct, SerializeTupleVariant,
 };
+use serde::Serialize;
 use std::fmt;
 use std::io::Write;
 
@@ -28,32 +28,108 @@ const fn escape_table() -> [u8; 256] {
 
 static ESCAPE: [u8; 256] = escape_table();
 
+#[doc(hidden)]
+pub trait Formatter {
+    fn indent<W: Write>(&mut self, writer: &mut W, depth: usize) -> std::io::Result<()>;
+    fn write_colon<W: Write>(&mut self, writer: &mut W) -> std::io::Result<()>;
+}
+
+#[doc(hidden)]
+#[derive(Default)]
+pub struct CompactFormatter;
+
+impl Formatter for CompactFormatter {
+    #[inline]
+    fn indent<W: Write>(&mut self, _writer: &mut W, _depth: usize) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    #[inline]
+    fn write_colon<W: Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        writer.write_all(b":")
+    }
+}
+
+#[doc(hidden)]
+#[derive(Default)]
+pub struct PrettyFormatter;
+
+impl Formatter for PrettyFormatter {
+    #[inline]
+    fn indent<W: Write>(&mut self, writer: &mut W, depth: usize) -> std::io::Result<()> {
+        writer.write_all(b"\n")?;
+        for _ in 0..depth {
+            writer.write_all(b"  ")?;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn write_colon<W: Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        writer.write_all(b": ")
+    }
+}
+
+struct VecWriter {
+    bytes: Vec<u8>,
+}
+
+impl VecWriter {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(capacity),
+        }
+    }
+}
+
+impl Write for VecWriter {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    #[inline]
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Streaming JSON serializer.
-pub struct Serializer<W> {
+pub struct Serializer<W, F = CompactFormatter> {
     writer: W,
-    pretty: bool,
+    formatter: F,
     depth: usize,
 }
 
-impl<W: Write> Serializer<W> {
+impl<W> Serializer<W, CompactFormatter> {
     #[must_use]
     pub const fn new(writer: W) -> Self {
         Self {
             writer,
-            pretty: false,
+            formatter: CompactFormatter,
             depth: 0,
         }
     }
+}
 
+impl<W> Serializer<W, PrettyFormatter> {
     #[must_use]
     pub const fn pretty(writer: W) -> Self {
         Self {
             writer,
-            pretty: true,
+            formatter: PrettyFormatter,
             depth: 0,
         }
     }
+}
 
+impl<W: Write, F: Formatter> Serializer<W, F> {
     pub fn into_inner(self) -> W {
         self.writer
     }
@@ -65,13 +141,16 @@ impl<W: Write> Serializer<W> {
 
     #[inline]
     fn indent(&mut self) -> Result<()> {
-        if self.pretty {
-            self.write(b"\n")?;
-            for _ in 0..self.depth {
-                self.write(b"  ")?;
-            }
-        }
-        Ok(())
+        self.formatter
+            .indent(&mut self.writer, self.depth)
+            .map_err(Error::from)
+    }
+
+    #[inline]
+    fn write_colon(&mut self) -> Result<()> {
+        self.formatter
+            .write_colon(&mut self.writer)
+            .map_err(Error::from)
     }
 
     #[inline]
@@ -117,17 +196,7 @@ impl<W: Write> Serializer<W> {
     #[inline]
     fn write_f64(&mut self, value: f64) -> Result<()> {
         if value.is_finite() {
-            let mut buffer = ryu::Buffer::new();
-            let formatted = buffer.format_finite(value);
-            if let Some(exponent) = memchr::memchr(b'e', formatted.as_bytes())
-                && !matches!(formatted.as_bytes().get(exponent + 1), Some(b'+' | b'-'))
-            {
-                self.write(&formatted.as_bytes()[..=exponent])?;
-                self.write(b"+")?;
-                self.write(&formatted.as_bytes()[exponent + 1..])
-            } else {
-                self.write(formatted.as_bytes())
-            }
+            self.write(zmij::Buffer::new().format_finite(value).as_bytes())
         } else {
             self.write(b"null")
         }
@@ -148,9 +217,9 @@ impl<W: Write> Serializer<W> {
 /// Returns an error when `value` cannot be represented as supported JSON.
 #[inline]
 pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    let mut serializer = Serializer::new(Vec::with_capacity(128));
+    let mut serializer = Serializer::new(VecWriter::with_capacity(128));
     value.serialize(&mut serializer)?;
-    Ok(serializer.into_inner())
+    Ok(serializer.into_inner().bytes)
 }
 
 /// Serializes a value into a compact UTF-8 string.
@@ -164,15 +233,24 @@ pub fn to_string<T: Serialize + ?Sized>(value: &T) -> Result<String> {
         .map_err(|_| Error::message("serializer emitted invalid UTF-8"))
 }
 
+/// Serializes a value into a pretty-printed byte vector.
+///
+/// # Errors
+///
+/// Returns an error when `value` cannot be represented as supported JSON.
+pub fn to_vec_pretty<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
+    let mut serializer = Serializer::pretty(VecWriter::with_capacity(256));
+    value.serialize(&mut serializer)?;
+    Ok(serializer.into_inner().bytes)
+}
+
 /// Serializes a value into a pretty-printed UTF-8 string.
 ///
 /// # Errors
 ///
 /// Returns an error when `value` cannot be represented as supported JSON.
 pub fn to_string_pretty<T: Serialize + ?Sized>(value: &T) -> Result<String> {
-    let mut serializer = Serializer::pretty(Vec::with_capacity(256));
-    value.serialize(&mut serializer)?;
-    String::from_utf8(serializer.into_inner())
+    String::from_utf8(to_vec_pretty(value)?)
         .map_err(|_| Error::message("serializer emitted invalid UTF-8"))
 }
 
@@ -186,16 +264,16 @@ pub fn to_writer<W: Write, T: Serialize + ?Sized>(writer: W, value: &T) -> Resul
     value.serialize(&mut Serializer::new(writer))
 }
 
-impl<'a, W: Write> ser::Serializer for &'a mut Serializer<W> {
+impl<'a, W: Write, F: Formatter> ser::Serializer for &'a mut Serializer<W, F> {
     type Ok = ();
     type Error = Error;
-    type SerializeSeq = Compound<'a, W>;
-    type SerializeTuple = Compound<'a, W>;
-    type SerializeTupleStruct = Compound<'a, W>;
-    type SerializeTupleVariant = Compound<'a, W>;
-    type SerializeMap = Compound<'a, W>;
-    type SerializeStruct = Compound<'a, W>;
-    type SerializeStructVariant = Compound<'a, W>;
+    type SerializeSeq = Compound<'a, W, F>;
+    type SerializeTuple = Compound<'a, W, F>;
+    type SerializeTupleStruct = Compound<'a, W, F>;
+    type SerializeTupleVariant = Compound<'a, W, F>;
+    type SerializeMap = Compound<'a, W, F>;
+    type SerializeStruct = Compound<'a, W, F>;
+    type SerializeStructVariant = Compound<'a, W, F>;
 
     #[inline]
     fn serialize_bool(self, value: bool) -> Result<()> {
@@ -223,7 +301,7 @@ impl<'a, W: Write> ser::Serializer for &'a mut Serializer<W> {
     }
 
     fn serialize_i128(self, value: i128) -> Result<()> {
-        self.write(value.to_string().as_bytes())
+        self.write(itoa::Buffer::new().format(value).as_bytes())
     }
 
     #[inline]
@@ -247,7 +325,7 @@ impl<'a, W: Write> ser::Serializer for &'a mut Serializer<W> {
     }
 
     fn serialize_u128(self, value: u128) -> Result<()> {
-        self.write(value.to_string().as_bytes())
+        self.write(itoa::Buffer::new().format(value).as_bytes())
     }
 
     #[inline]
@@ -323,7 +401,7 @@ impl<'a, W: Write> ser::Serializer for &'a mut Serializer<W> {
         self.begin(b'{')?;
         self.indent()?;
         self.write_string(variant)?;
-        self.write(if self.pretty { b": " } else { b":" })?;
+        self.write_colon()?;
         value.serialize(&mut *self)?;
         self.depth -= 1;
         self.indent()?;
@@ -358,7 +436,7 @@ impl<'a, W: Write> ser::Serializer for &'a mut Serializer<W> {
         self.begin(b'{')?;
         self.indent()?;
         self.write_string(variant)?;
-        self.write(if self.pretty { b": " } else { b":" })?;
+        self.write_colon()?;
         self.begin(b'[')?;
         Ok(Compound::new(self, Kind::Array, Some(length), true))
     }
@@ -384,7 +462,7 @@ impl<'a, W: Write> ser::Serializer for &'a mut Serializer<W> {
         self.begin(b'{')?;
         self.indent()?;
         self.write_string(variant)?;
-        self.write(if self.pretty { b": " } else { b":" })?;
+        self.write_colon()?;
         self.begin(b'{')?;
         Ok(Compound::new(self, Kind::Object, Some(length), true))
     }
@@ -417,17 +495,17 @@ enum Wrapper {
     Object,
 }
 
-pub struct Compound<'a, W> {
-    serializer: &'a mut Serializer<W>,
+pub struct Compound<'a, W, F> {
+    serializer: &'a mut Serializer<W, F>,
     kind: Kind,
     state: CompoundState,
     wrapper: Wrapper,
     _length: Option<usize>,
 }
 
-impl<'a, W: Write> Compound<'a, W> {
-    const fn new(
-        serializer: &'a mut Serializer<W>,
+impl<'a, W: Write, F: Formatter> Compound<'a, W, F> {
+    fn new(
+        serializer: &'a mut Serializer<W, F>,
         kind: Kind,
         length: Option<usize>,
         outer_object: bool,
@@ -459,8 +537,7 @@ impl<'a, W: Write> Compound<'a, W> {
     fn key(&mut self, key: &str) -> Result<()> {
         self.separator()?;
         self.serializer.write_string(key)?;
-        self.serializer
-            .write(if self.serializer.pretty { b": " } else { b":" })?;
+        self.serializer.write_colon()?;
         self.state = CompoundState::KeyPending;
         Ok(())
     }
@@ -487,7 +564,7 @@ impl<'a, W: Write> Compound<'a, W> {
     }
 }
 
-impl<W: Write> SerializeSeq for Compound<'_, W> {
+impl<W: Write, F: Formatter> SerializeSeq for Compound<'_, W, F> {
     type Ok = ();
     type Error = Error;
 
@@ -502,7 +579,7 @@ impl<W: Write> SerializeSeq for Compound<'_, W> {
     }
 }
 
-impl<W: Write> SerializeTuple for Compound<'_, W> {
+impl<W: Write, F: Formatter> SerializeTuple for Compound<'_, W, F> {
     type Ok = ();
     type Error = Error;
 
@@ -515,7 +592,7 @@ impl<W: Write> SerializeTuple for Compound<'_, W> {
     }
 }
 
-impl<W: Write> SerializeTupleStruct for Compound<'_, W> {
+impl<W: Write, F: Formatter> SerializeTupleStruct for Compound<'_, W, F> {
     type Ok = ();
     type Error = Error;
 
@@ -528,7 +605,7 @@ impl<W: Write> SerializeTupleStruct for Compound<'_, W> {
     }
 }
 
-impl<W: Write> SerializeTupleVariant for Compound<'_, W> {
+impl<W: Write, F: Formatter> SerializeTupleVariant for Compound<'_, W, F> {
     type Ok = ();
     type Error = Error;
 
@@ -541,7 +618,7 @@ impl<W: Write> SerializeTupleVariant for Compound<'_, W> {
     }
 }
 
-impl<W: Write> SerializeMap for Compound<'_, W> {
+impl<W: Write, F: Formatter> SerializeMap for Compound<'_, W, F> {
     type Ok = ();
     type Error = Error;
 
@@ -551,8 +628,7 @@ impl<W: Write> SerializeMap for Compound<'_, W> {
         key.serialize(WriteKeySerializer {
             serializer: &mut *self.serializer,
         })?;
-        self.serializer
-            .write(if self.serializer.pretty { b": " } else { b":" })?;
+        self.serializer.write_colon()?;
         self.state = CompoundState::KeyPending;
         Ok(())
     }
@@ -571,7 +647,7 @@ impl<W: Write> SerializeMap for Compound<'_, W> {
     }
 }
 
-impl<W: Write> SerializeStruct for Compound<'_, W> {
+impl<W: Write, F: Formatter> SerializeStruct for Compound<'_, W, F> {
     type Ok = ();
     type Error = Error;
 
@@ -591,7 +667,7 @@ impl<W: Write> SerializeStruct for Compound<'_, W> {
     }
 }
 
-impl<W: Write> SerializeStructVariant for Compound<'_, W> {
+impl<W: Write, F: Formatter> SerializeStructVariant for Compound<'_, W, F> {
     type Ok = ();
     type Error = Error;
 
@@ -608,8 +684,8 @@ impl<W: Write> SerializeStructVariant for Compound<'_, W> {
     }
 }
 
-struct WriteKeySerializer<'a, W> {
-    serializer: &'a mut Serializer<W>,
+struct WriteKeySerializer<'a, W, F> {
+    serializer: &'a mut Serializer<W, F>,
 }
 
 macro_rules! write_key_integer {
@@ -617,13 +693,14 @@ macro_rules! write_key_integer {
         $(
             #[inline]
             fn $method(self, value: $type) -> Result<()> {
-                self.serializer.write_string(&value.to_string())
+                let mut buffer = itoa::Buffer::new();
+                self.serializer.write_string(buffer.format(value))
             }
         )+
     };
 }
 
-impl<W: Write> ser::Serializer for WriteKeySerializer<'_, W> {
+impl<W: Write, F: Formatter> ser::Serializer for WriteKeySerializer<'_, W, F> {
     type Ok = ();
     type Error = Error;
     type SerializeSeq = Impossible<(), Error>;
@@ -928,7 +1005,7 @@ impl ser::Serializer for KeySerializer {
 /// # Errors
 ///
 /// Returns an error when `value` cannot be represented by the supported DOM.
-pub fn to_value<T: Serialize + ?Sized>(value: &T) -> Result<Value> {
+pub fn to_value<T: Serialize>(value: T) -> Result<Value> {
     value.serialize(ValueSerializer)
 }
 

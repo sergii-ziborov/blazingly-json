@@ -2,19 +2,22 @@
 
 mod de;
 mod error;
+mod map;
 mod number;
+mod raw;
 mod ser;
 mod value;
 mod value_de;
 
-pub use de::{Deserializer, from_slice, from_str};
+pub use de::{from_slice, from_str, Cursor, Deserializer, Field, Object};
 pub use error::{Error, Result};
+pub use map::Map;
 pub use number::Number;
-pub use ser::{Serializer, to_string, to_string_pretty, to_value, to_vec, to_writer};
-pub use value::{Value, ValueIndex, from_value};
-
-/// Object map used by [`Value`].
-pub type Map<K, V> = std::collections::BTreeMap<K, V>;
+pub use raw::RawJson;
+pub use ser::{
+    to_string, to_string_pretty, to_value, to_vec, to_vec_pretty, to_writer, Serializer,
+};
+pub use value::{from_value, Value, ValueIndex};
 
 #[doc(hidden)]
 #[macro_export]
@@ -42,6 +45,25 @@ macro_rules! __json_array {
 #[macro_export]
 macro_rules! __json_object {
     ($object:ident;) => {};
+    ($object:ident; ($key:expr) : null $(, $($rest:tt)*)?) => {
+        $object.insert(($key).into(), $crate::Value::Null);
+        $crate::__json_object!($object; $($($rest)*)?);
+    };
+    ($object:ident; ($key:expr) : [$($array:tt)*] $(, $($rest:tt)*)?) => {
+        $object.insert(($key).into(), $crate::json!([$($array)*]));
+        $crate::__json_object!($object; $($($rest)*)?);
+    };
+    ($object:ident; ($key:expr) : {$($nested:tt)*} $(, $($rest:tt)*)?) => {
+        $object.insert(($key).into(), $crate::json!({$($nested)*}));
+        $crate::__json_object!($object; $($($rest)*)?);
+    };
+    ($object:ident; ($key:expr) : $value:expr $(, $($rest:tt)*)?) => {
+        $object.insert(
+            ($key).into(),
+            $crate::to_value(&$value).expect("JSON value serialization failed"),
+        );
+        $crate::__json_object!($object; $($($rest)*)?);
+    };
     ($object:ident; $key:literal : null $(, $($rest:tt)*)?) => {
         $object.insert(($key).into(), $crate::Value::Null);
         $crate::__json_object!($object; $($($rest)*)?);

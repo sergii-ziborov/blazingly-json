@@ -1,5 +1,6 @@
 use blazingly_json::{
-    Value, from_slice, from_str, from_value, json, to_string, to_string_pretty, to_value, to_vec,
+    from_slice, from_str, from_value, json, to_string, to_string_pretty, to_value, to_vec,
+    to_vec_pretty, Map, Value,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -99,6 +100,57 @@ fn invalid_value_corpus_is_rejected_by_both_engines() {
         assert!(
             serde_json::from_str::<serde_json::Value>(fixture).is_err(),
             "serde_json accepted {fixture:?}"
+        );
+    }
+}
+
+#[test]
+fn typed_float_parser_preserves_json_syntax_rules() {
+    for fixture in ["01", "-01", "1.", "1e", "1e+", "+1", "NaN", "Infinity"] {
+        assert!(
+            from_str::<f64>(fixture).is_err(),
+            "blazingly-json accepted typed float {fixture:?}"
+        );
+        assert!(
+            serde_json::from_str::<f64>(fixture).is_err(),
+            "serde_json accepted typed float {fixture:?}"
+        );
+    }
+}
+
+#[test]
+fn typed_integer_boundaries_match_serde_json() {
+    for fixture in ["-9223372036854775808", "-1", "0", "9223372036854775807"] {
+        assert_eq!(
+            from_str::<i64>(fixture).unwrap(),
+            serde_json::from_str::<i64>(fixture).unwrap()
+        );
+    }
+    for fixture in ["0", "1", "18446744073709551615"] {
+        assert_eq!(
+            from_str::<u64>(fixture).unwrap(),
+            serde_json::from_str::<u64>(fixture).unwrap()
+        );
+    }
+    for fixture in ["-9223372036854775809", "9223372036854775808", "1.0", "1e1"] {
+        assert!(from_str::<i64>(fixture).is_err());
+        assert!(serde_json::from_str::<i64>(fixture).is_err());
+    }
+    for fixture in ["-1", "18446744073709551616", "1.0", "1e1"] {
+        assert!(from_str::<u64>(fixture).is_err());
+        assert!(serde_json::from_str::<u64>(fixture).is_err());
+    }
+
+    for value in [i128::MIN, -1, 0, i128::MAX] {
+        assert_eq!(
+            to_string(&value).unwrap(),
+            serde_json::to_string(&value).unwrap()
+        );
+    }
+    for value in [0, 1, u128::MAX] {
+        assert_eq!(
+            to_string(&value).unwrap(),
+            serde_json::to_string(&value).unwrap()
         );
     }
 }
@@ -246,5 +298,36 @@ fn difficult_float_round_trips_to_the_same_bits() {
         final_value.as_f64().unwrap().to_bits(),
         reference.to_bits(),
         "input={encoded}, reencoded={reencoded}"
+    );
+}
+
+#[test]
+fn dynamic_macro_keys_and_map_entry_match_blazingly_usage() {
+    let media_type = "application/json";
+    let mut value = json!({
+        (media_type): {
+            "schema": {"type": "object"}
+        }
+    });
+    value
+        .as_object_mut()
+        .unwrap()
+        .entry("x-blazingly-validators")
+        .or_insert_with(|| Value::Array(Vec::new()));
+
+    assert!(value[media_type]["schema"].is_object());
+    assert!(value["x-blazingly-validators"].is_array());
+
+    let mut standalone = Map::new();
+    standalone.entry("literal-key").or_insert(Value::Null);
+    assert!(standalone.contains_key("literal-key"));
+}
+
+#[test]
+fn pretty_vec_and_string_are_identical() {
+    let value = json!({"items": [1, 2, 3]});
+    assert_eq!(
+        to_vec_pretty(&value).unwrap(),
+        to_string_pretty(&value).unwrap().into_bytes()
     );
 }

@@ -1,29 +1,55 @@
 [package]
 name = "blazingly-json"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.88"
+edition = "2021"
+rust-version = "1.78"
 license = "MIT"
 description = "A focused, Tokio-free JSON engine for small protocol and API payloads"
 repository = "https://github.com/sergii-ziborov/blazingly-json"
+documentation = "https://docs.rs/blazingly-json"
 readme = "README.md"
 keywords = ["json", "serde", "mcp", "json-rpc", "performance"]
 categories = ["encoding", "parser-implementations", "web-programming"]
-publish = false
 
 [dependencies]
 itoa = "1.0.18"
+lexical-core = { version = "1.0.6", default-features = false, features = ["format", "parse-floats"] }
 memchr = "2.8.3"
-ryu = "1.0.23"
 serde = { version = "1.0.229", features = ["derive"] }
+zmij = "1.0.23"
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.11.0"
-serde_json = "1.0.151"
+serde_json = { version = "1.0.151", features = ["raw_value"] }
+stats_alloc = "0.1.10"
 
 [[bench]]
 name = "serde_json_comparison"
+harness = false
+
+[[bench]]
+name = "paired_comparison"
+harness = false
+
+[[bench]]
+name = "large_payload"
+harness = false
+
+[[bench]]
+name = "allocation_comparison"
+harness = false
+
+[[bench]]
+name = "mcp_fast_path"
+harness = false
+
+[[bench]]
+name = "mcp_allocations"
+harness = false
+
+[[bench]]
+name = "mcport_end_to_end"
 harness = false
 
 [lints.rust]

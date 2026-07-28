@@ -1,5 +1,5 @@
 use blazingly_json::Value;
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::hint::black_box;
@@ -180,12 +180,56 @@ fn serialize_graph(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn parse_hot_paths(criterion: &mut Criterion) {
+    let integers = serde_json::to_vec(&(0_u64..256).collect::<Vec<_>>()).unwrap();
+    let floats = serde_json::to_vec(
+        &(0..256)
+            .map(|value| f64::from(value) / 100.0 + 0.99)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let strings = serde_json::to_vec(
+        &(0..256)
+            .map(|value| format!("src/module_{}/symbol_{value}.rs", value % 12))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+
+    let mut group = criterion.benchmark_group("parse_hot_paths");
+    group.bench_function("blazingly_json/u64", |bench| {
+        bench.iter(|| {
+            blazingly_json::from_slice::<Vec<u64>>(black_box(integers.as_slice())).unwrap()
+        });
+    });
+    group.bench_function("serde_json/u64", |bench| {
+        bench.iter(|| serde_json::from_slice::<Vec<u64>>(black_box(integers.as_slice())).unwrap());
+    });
+    group.bench_function("blazingly_json/f64", |bench| {
+        bench
+            .iter(|| blazingly_json::from_slice::<Vec<f64>>(black_box(floats.as_slice())).unwrap());
+    });
+    group.bench_function("serde_json/f64", |bench| {
+        bench.iter(|| serde_json::from_slice::<Vec<f64>>(black_box(floats.as_slice())).unwrap());
+    });
+    group.bench_function("blazingly_json/string", |bench| {
+        bench.iter(|| {
+            blazingly_json::from_slice::<Vec<String>>(black_box(strings.as_slice())).unwrap()
+        });
+    });
+    group.bench_function("serde_json/string", |bench| {
+        bench
+            .iter(|| serde_json::from_slice::<Vec<String>>(black_box(strings.as_slice())).unwrap());
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     parse_value,
     parse_typed,
     serialize_typed,
     parse_project_payloads,
-    serialize_graph
+    serialize_graph,
+    parse_hot_paths
 );
 criterion_main!(benches);

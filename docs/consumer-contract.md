@@ -18,10 +18,14 @@ modified by this work.
 - `Value`, `Map<String, Value>`, and `Number`;
 - `json!`;
 - `from_str`, `from_slice`, `from_value`;
-- `to_string`, `to_string_pretty`, `to_vec`, `to_writer`, `to_value`;
+- `to_string`, `to_string_pretty`, `to_vec`, `to_vec_pretty`, `to_writer`,
+  `to_value`;
+- borrowed, validated raw sub-values for routing an MCP/JSON-RPC envelope
+  without constructing a complete mutable DOM;
 - a slice deserializer usable by `serde_path_to_error`;
 - string, bool, signed, unsigned, float, null, array, and object values;
 - object/array access, mutation, indexing, JSON Pointer, and `take`;
+- literal and dynamic `json!` object keys;
 - Serde structs, maps, sequences, options, enums, newtypes, and byte sequences.
 
 ## Deliberate exclusions for 0.1
@@ -43,5 +47,7 @@ hot path justifies it.
 3. Parser depth and malformed Unicode must fail safely.
 4. Benchmarks must cover MCP requests, typed HTTP bodies, JWT claims, graph
    payloads, JSONL metadata, and compact response serialization.
-5. Each consumer must compile and pass its own tests in a later, separate
-   integration experiment.
+5. Each consumer must compile and pass its own tests in a separate temporary
+   integration experiment before any real dependency edit.
+6. `mcport` must preserve response semantics end to end, not merely improve a
+   parser microbenchmark.

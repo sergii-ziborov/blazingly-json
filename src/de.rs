@@ -1,15 +1,45 @@
+use crate::raw::RAW_JSON_TOKEN;
 use crate::{Error, Result};
-use memchr::memchr2;
-use serde::Deserialize;
 use serde::de::{
     self, DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, SeqAccess, VariantAccess,
     Visitor,
 };
+use serde::Deserialize;
 use std::borrow::Cow;
 use std::fmt;
 use std::str;
 
 const MAX_DEPTH: usize = 128;
+const STRING_WORD_BYTES: usize = std::mem::size_of::<u64>();
+const ONE_BYTES: u64 = u64::MAX / 255;
+const HIGH_BYTES: u64 = ONE_BYTES << 7;
+
+#[inline]
+fn find_string_special(bytes: &[u8]) -> Option<usize> {
+    let mut offset = 0;
+    let mut chunks = bytes.chunks_exact(STRING_WORD_BYTES);
+
+    for chunk in &mut chunks {
+        let word = u64::from_le_bytes(chunk.try_into().expect("u64-sized chunk"));
+        let contains_control = word.wrapping_sub(ONE_BYTES * 0x20) & !word;
+        let quote = word ^ (ONE_BYTES * u64::from(b'"'));
+        let contains_quote = quote.wrapping_sub(ONE_BYTES) & !quote;
+        let backslash = word ^ (ONE_BYTES * u64::from(b'\\'));
+        let contains_backslash = backslash.wrapping_sub(ONE_BYTES) & !backslash;
+        let special = (contains_control | contains_quote | contains_backslash) & HIGH_BYTES;
+
+        if special != 0 {
+            return Some(offset + special.trailing_zeros() as usize / 8);
+        }
+        offset += STRING_WORD_BYTES;
+    }
+
+    chunks
+        .remainder()
+        .iter()
+        .position(|&byte| byte < 0x20 || matches!(byte, b'"' | b'\\'))
+        .map(|relative| offset + relative)
+}
 
 /// A zero-copy Serde deserializer over a UTF-8 JSON slice.
 pub struct Deserializer<'de> {
@@ -17,6 +47,192 @@ pub struct Deserializer<'de> {
     source: Option<&'de str>,
     index: usize,
     depth: usize,
+}
+
+/// A low-level, allocation-free cursor for routing selected object fields.
+///
+/// Prefer normal Serde deserialization for application models. `Cursor` is
+/// intended for protocol envelopes whose hot path must inspect a few fields
+/// and defer large nested values as [`crate::RawJson`].
+pub struct Cursor<'de> {
+    deserializer: Deserializer<'de>,
+}
+
+/// Streaming view over one JSON object visited by [`Cursor::object`].
+pub struct Object<'cursor, 'de> {
+    deserializer: &'cursor mut Deserializer<'de>,
+    first: bool,
+    finished: bool,
+}
+
+/// One object member. The value must be consumed with one of this type's
+/// methods before requesting the next field.
+pub struct Field<'cursor, 'de> {
+    name: Cow<'de, str>,
+    deserializer: &'cursor mut Deserializer<'de>,
+}
+
+impl<'de> Cursor<'de> {
+    /// Creates a cursor over a byte slice.
+    #[must_use]
+    pub const fn from_slice(input: &'de [u8]) -> Self {
+        Self {
+            deserializer: Deserializer::from_slice(input),
+        }
+    }
+
+    /// Creates a cursor over a UTF-8 string.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(input: &'de str) -> Self {
+        Self {
+            deserializer: Deserializer::from_str(input),
+        }
+    }
+
+    /// Visits the next value as an object.
+    ///
+    /// Unvisited fields are validated and skipped before this method returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed JSON or when the next value is not an
+    /// object.
+    pub fn object<T>(
+        &mut self,
+        visitor: impl FnOnce(&mut Object<'_, 'de>) -> Result<T>,
+    ) -> Result<T> {
+        visit_object(&mut self.deserializer, visitor)
+    }
+
+    /// Verifies that no trailing value or garbage remains.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when non-whitespace input remains.
+    pub fn end(&mut self) -> Result<()> {
+        self.deserializer.end()
+    }
+}
+
+impl<'de> Object<'_, 'de> {
+    /// Returns the next field, or `None` after the closing brace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed object syntax.
+    pub fn next_field(&mut self) -> Result<Option<Field<'_, 'de>>> {
+        if self.finished {
+            return Ok(None);
+        }
+        self.deserializer.skip_whitespace();
+        if self.deserializer.input.get(self.deserializer.index) == Some(&b'}') {
+            self.deserializer.index += 1;
+            self.deserializer.leave();
+            self.finished = true;
+            return Ok(None);
+        }
+        if self.first {
+            self.first = false;
+        } else {
+            self.deserializer.expect_byte(b',')?;
+            if self.deserializer.peek() == Some(b'}') {
+                return Err(self.deserializer.error("trailing comma in object"));
+            }
+        }
+        let name = self.deserializer.parse_string()?;
+        self.deserializer.expect_byte(b':')?;
+        Ok(Some(Field {
+            name,
+            deserializer: self.deserializer,
+        }))
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        while let Some(field) = self.next_field()? {
+            field.skip()?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Object<'_, '_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.deserializer.leave();
+        }
+    }
+}
+
+impl<'de> Field<'_, 'de> {
+    /// Returns this member's decoded field name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Skips and validates this member's value without constructing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed JSON.
+    pub fn skip(self) -> Result<()> {
+        self.deserializer.skip_value()
+    }
+
+    /// Captures this member's value without allocating.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed JSON.
+    pub fn raw(self) -> Result<crate::RawJson<'de>> {
+        self.deserializer.capture_raw().map(crate::RawJson::new)
+    }
+
+    /// Decodes this member as a string, borrowing when it has no escapes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is not a valid JSON string.
+    pub fn string(self) -> Result<Cow<'de, str>> {
+        self.deserializer.parse_string()
+    }
+
+    /// Deserializes this member into a Serde type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed JSON or a type mismatch.
+    pub fn deserialize<T: Deserialize<'de>>(self) -> Result<T> {
+        T::deserialize(&mut *self.deserializer)
+    }
+
+    /// Visits this member as a nested object.
+    ///
+    /// Unvisited nested fields are validated and skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed JSON or when the value is not an object.
+    pub fn object<T>(self, visitor: impl FnOnce(&mut Object<'_, 'de>) -> Result<T>) -> Result<T> {
+        visit_object(self.deserializer, visitor)
+    }
+}
+
+fn visit_object<'de, T>(
+    deserializer: &mut Deserializer<'de>,
+    visitor: impl FnOnce(&mut Object<'_, 'de>) -> Result<T>,
+) -> Result<T> {
+    deserializer.expect_byte(b'{')?;
+    deserializer.enter()?;
+    let mut object = Object {
+        deserializer,
+        first: true,
+        finished: false,
+    };
+    let value = visitor(&mut object)?;
+    object.finish()?;
+    Ok(value)
 }
 
 impl<'de> Deserializer<'de> {
@@ -129,18 +345,10 @@ impl<'de> Deserializer<'de> {
         let start = self.index;
         let source = self.utf8_source()?;
 
-        let remaining = &self.input[self.index..];
-        let Some(relative) = memchr2(b'"', b'\\', remaining) else {
+        let Some(relative) = find_string_special(&self.input[self.index..]) else {
             return Err(self.error("unterminated string"));
         };
         let special = self.index + relative;
-        if self.input[self.index..special]
-            .iter()
-            .any(|&byte| byte < 0x20)
-        {
-            self.index = special;
-            return Err(self.error("control character in string"));
-        }
         match self.input[special] {
             b'"' => {
                 let raw = &self.input[start..special];
@@ -152,7 +360,10 @@ impl<'de> Deserializer<'de> {
                 self.index = special;
                 self.parse_escaped_string(start)
             }
-            _ => unreachable!(),
+            _ => {
+                self.index = special;
+                Err(self.error("control character in string"))
+            }
         }
     }
 
@@ -234,6 +445,132 @@ impl<'de> Deserializer<'de> {
         }
     }
 
+    fn skip_string(&mut self) -> Result<()> {
+        self.skip_whitespace();
+        if self.input.get(self.index) != Some(&b'"') {
+            return Err(self.error("expected a string"));
+        }
+        self.index += 1;
+        self.utf8_source()?;
+
+        loop {
+            let Some(relative) = find_string_special(&self.input[self.index..]) else {
+                return Err(self.error("unterminated string"));
+            };
+            let special = self.index + relative;
+            match self.input[special] {
+                b'"' => {
+                    self.index = special + 1;
+                    return Ok(());
+                }
+                b'\\' => {
+                    self.index = special + 1;
+                    let escaped = self
+                        .input
+                        .get(self.index)
+                        .copied()
+                        .ok_or_else(|| self.error("unterminated escape"))?;
+                    self.index += 1;
+                    match escaped {
+                        b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {}
+                        b'u' => {
+                            let code = self.parse_hex_quad()?;
+                            if (0xD800..=0xDBFF).contains(&code) {
+                                if self.input.get(self.index..self.index + 2) != Some(b"\\u") {
+                                    return Err(self.error("high surrogate without low surrogate"));
+                                }
+                                self.index += 2;
+                                let low = self.parse_hex_quad()?;
+                                if !(0xDC00..=0xDFFF).contains(&low) {
+                                    return Err(self.error("invalid low surrogate"));
+                                }
+                            } else if (0xDC00..=0xDFFF).contains(&code) {
+                                return Err(self.error("unexpected low surrogate"));
+                            }
+                        }
+                        _ => return Err(self.error("invalid string escape")),
+                    }
+                }
+                _ => {
+                    self.index = special;
+                    return Err(self.error("control character in string"));
+                }
+            }
+        }
+    }
+
+    fn skip_value(&mut self) -> Result<()> {
+        match self.peek() {
+            Some(b'n') => self.parse_literal(b"null"),
+            Some(b't') => self.parse_literal(b"true"),
+            Some(b'f') => self.parse_literal(b"false"),
+            Some(b'"') => self.skip_string(),
+            Some(b'-' | b'0'..=b'9') => self.parse_number().map(|_| ()),
+            Some(b'[') => self.skip_array(),
+            Some(b'{') => self.skip_object(),
+            Some(_) => Err(self.error("expected a JSON value")),
+            None => Err(self.error("unexpected end of input")),
+        }
+    }
+
+    fn skip_array(&mut self) -> Result<()> {
+        self.expect_byte(b'[')?;
+        self.enter()?;
+        let result = (|| {
+            if self.peek() == Some(b']') {
+                self.index += 1;
+                return Ok(());
+            }
+            loop {
+                self.skip_value()?;
+                match self.peek() {
+                    Some(b',') => self.index += 1,
+                    Some(b']') => {
+                        self.index += 1;
+                        return Ok(());
+                    }
+                    _ => return Err(self.error("expected `,` or `]`")),
+                }
+            }
+        })();
+        self.leave();
+        result
+    }
+
+    fn skip_object(&mut self) -> Result<()> {
+        self.expect_byte(b'{')?;
+        self.enter()?;
+        let result = (|| {
+            if self.peek() == Some(b'}') {
+                self.index += 1;
+                return Ok(());
+            }
+            loop {
+                self.skip_string()?;
+                self.expect_byte(b':')?;
+                self.skip_value()?;
+                match self.peek() {
+                    Some(b',') => self.index += 1,
+                    Some(b'}') => {
+                        self.index += 1;
+                        return Ok(());
+                    }
+                    _ => return Err(self.error("expected `,` or `}`")),
+                }
+            }
+        })();
+        self.leave();
+        result
+    }
+
+    fn capture_raw(&mut self) -> Result<&'de str> {
+        self.skip_whitespace();
+        let start = self.index;
+        self.skip_value()?;
+        str::from_utf8(&self.input[start..self.index])
+            .map_err(|_| self.error("input is not valid UTF-8"))
+    }
+
     fn parse_hex_quad(&mut self) -> Result<u16> {
         let end = self.index.saturating_add(4);
         let digits = self
@@ -255,10 +592,12 @@ impl<'de> Deserializer<'de> {
     fn parse_number(&mut self) -> Result<ParsedNumber<'de>> {
         self.skip_whitespace();
         let start = self.index;
-        if self.input.get(self.index) == Some(&b'-') {
+        let negative = self.input.get(self.index) == Some(&b'-');
+        if negative {
             self.index += 1;
         }
 
+        let mut magnitude = Some(0_u64);
         match self.input.get(self.index).copied() {
             Some(b'0') => {
                 self.index += 1;
@@ -266,9 +605,15 @@ impl<'de> Deserializer<'de> {
                     return Err(self.error("leading zero in number"));
                 }
             }
-            Some(b'1'..=b'9') => {
+            Some(first @ b'1'..=b'9') => {
+                magnitude = Some(u64::from(first - b'0'));
                 self.index += 1;
-                while self.input.get(self.index).is_some_and(u8::is_ascii_digit) {
+                while let Some(digit @ b'0'..=b'9') = self.input.get(self.index).copied() {
+                    magnitude = magnitude.and_then(|value| {
+                        value
+                            .checked_mul(10)
+                            .and_then(|value| value.checked_add(u64::from(digit - b'0')))
+                    });
                     self.index += 1;
                 }
             }
@@ -305,7 +650,158 @@ impl<'de> Deserializer<'de> {
 
         let raw = str::from_utf8(&self.input[start..self.index])
             .map_err(|_| self.error("number is not ASCII"))?;
-        Ok(ParsedNumber { raw, float })
+        Ok(ParsedNumber {
+            raw,
+            float,
+            negative,
+            magnitude,
+        })
+    }
+
+    #[inline]
+    fn parse_u64_value(&mut self) -> Result<u64> {
+        self.skip_whitespace();
+        let first = self
+            .input
+            .get(self.index)
+            .copied()
+            .ok_or_else(|| self.error("invalid number"))?;
+        if first == b'-' {
+            return Err(self.error("expected an unsigned integer"));
+        }
+
+        let mut value = match first {
+            b'0' => 0,
+            b'1'..=b'9' => u64::from(first - b'0'),
+            _ => return Err(self.error("invalid number")),
+        };
+        self.index += 1;
+
+        if first == b'0' && self.input.get(self.index).is_some_and(u8::is_ascii_digit) {
+            return Err(self.error("leading zero in number"));
+        }
+
+        while let Some(digit @ b'0'..=b'9') = self.input.get(self.index).copied() {
+            value = value
+                .checked_mul(10)
+                .and_then(|value| value.checked_add(u64::from(digit - b'0')))
+                .ok_or_else(|| self.error("integer is out of range"))?;
+            self.index += 1;
+        }
+
+        if matches!(self.input.get(self.index), Some(b'.' | b'e' | b'E')) {
+            return Err(self.error("expected an unsigned integer"));
+        }
+        Ok(value)
+    }
+
+    #[inline]
+    fn parse_i64_value(&mut self) -> Result<i64> {
+        self.skip_whitespace();
+        let negative = self.input.get(self.index) == Some(&b'-');
+        if negative {
+            self.index += 1;
+        }
+        let first = self
+            .input
+            .get(self.index)
+            .copied()
+            .ok_or_else(|| self.error("invalid number"))?;
+
+        let mut magnitude = match first {
+            b'0' => 0,
+            b'1'..=b'9' => u64::from(first - b'0'),
+            _ => return Err(self.error("invalid number")),
+        };
+        self.index += 1;
+
+        if first == b'0' && self.input.get(self.index).is_some_and(u8::is_ascii_digit) {
+            return Err(self.error("leading zero in number"));
+        }
+        while let Some(digit @ b'0'..=b'9') = self.input.get(self.index).copied() {
+            magnitude = magnitude
+                .checked_mul(10)
+                .and_then(|value| value.checked_add(u64::from(digit - b'0')))
+                .ok_or_else(|| self.error("integer is out of range"))?;
+            self.index += 1;
+        }
+        if matches!(self.input.get(self.index), Some(b'.' | b'e' | b'E')) {
+            return Err(self.error("expected an integer"));
+        }
+
+        if negative {
+            if magnitude == (i64::MAX as u64) + 1 {
+                Ok(i64::MIN)
+            } else {
+                i64::try_from(magnitude)
+                    .map(|value| -value)
+                    .map_err(|_| self.error("integer is out of range"))
+            }
+        } else {
+            i64::try_from(magnitude).map_err(|_| self.error("integer is out of range"))
+        }
+    }
+
+    #[inline]
+    fn numeric_start(&mut self) -> Result<usize> {
+        self.skip_whitespace();
+        let start = self.index;
+        let unsigned_start = if self.input.get(start) == Some(&b'-') {
+            start + 1
+        } else {
+            start
+        };
+        let first = self
+            .input
+            .get(unsigned_start)
+            .copied()
+            .ok_or_else(|| self.error("invalid number"))?;
+        if !first.is_ascii_digit() {
+            return Err(self.error("invalid number"));
+        }
+        if first == b'0'
+            && self
+                .input
+                .get(unsigned_start + 1)
+                .is_some_and(u8::is_ascii_digit)
+        {
+            return Err(self.error("leading zero in number"));
+        }
+        Ok(start)
+    }
+
+    #[inline]
+    fn parse_f32_value(&mut self) -> Result<f32> {
+        let start = self.numeric_start()?;
+        let (value, consumed) =
+            lexical_core::parse_partial_with_options::<f32, { lexical_core::format::JSON }>(
+                &self.input[start..],
+                &lexical_core::parse_float_options::JSON,
+            )
+            .map_err(|_| self.error("number is out of range"))?;
+        self.index = start + consumed;
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(self.error("number is out of range"))
+        }
+    }
+
+    #[inline]
+    fn parse_f64_value(&mut self) -> Result<f64> {
+        let start = self.numeric_start()?;
+        let (value, consumed) =
+            lexical_core::parse_partial_with_options::<f64, { lexical_core::format::JSON }>(
+                &self.input[start..],
+                &lexical_core::parse_float_options::JSON,
+            )
+            .map_err(|_| self.error("number is out of range"))?;
+        self.index = start + consumed;
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(self.error("number is out of range"))
+        }
     }
 }
 
@@ -322,30 +818,45 @@ fn hex_value(byte: u8) -> Option<u8> {
 struct ParsedNumber<'de> {
     raw: &'de str,
     float: bool,
+    negative: bool,
+    magnitude: Option<u64>,
 }
 
 impl ParsedNumber<'_> {
     fn visit_any<'de, V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         if self.float || self.raw == "-0" {
-            let value = self
-                .raw
-                .parse::<f64>()
-                .map_err(|_| Error::message("number is out of range"))?;
+            let value = lexical_core::parse_with_options::<f64, { lexical_core::format::JSON }>(
+                self.raw.as_bytes(),
+                &lexical_core::parse_float_options::JSON,
+            )
+            .map_err(|_| Error::message("number is out of range"))?;
             if !value.is_finite() {
                 return Err(Error::message("number is out of range"));
             }
             return visitor.visit_f64(value);
         }
-        if self.raw.starts_with('-') {
-            self.raw
-                .parse::<i64>()
-                .map_err(|_| Error::message("integer is out of range"))
+        if self.negative {
+            self.checked_i64()
+                .ok_or_else(|| Error::message("integer is out of range"))
                 .and_then(|value| visitor.visit_i64(value))
         } else {
-            self.raw
-                .parse::<u64>()
-                .map_err(|_| Error::message("integer is out of range"))
+            self.magnitude
+                .ok_or_else(|| Error::message("integer is out of range"))
                 .and_then(|value| visitor.visit_u64(value))
+        }
+    }
+
+    #[inline]
+    fn checked_i64(&self) -> Option<i64> {
+        let magnitude = self.magnitude?;
+        if self.negative {
+            if magnitude == (i64::MAX as u64) + 1 {
+                Some(i64::MIN)
+            } else {
+                i64::try_from(magnitude).ok().map(|value| -value)
+            }
+        } else {
+            i64::try_from(magnitude).ok()
         }
     }
 }
@@ -370,7 +881,10 @@ pub fn from_slice<'de, T: Deserialize<'de>>(input: &'de [u8]) -> Result<T> {
 /// Returns an error for malformed JSON, trailing data, or a Serde type mismatch.
 #[inline]
 pub fn from_str<'de, T: Deserialize<'de>>(input: &'de str) -> Result<T> {
-    from_slice(input.as_bytes())
+    let mut deserializer = Deserializer::from_str(input);
+    let value = T::deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(value)
 }
 
 impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
@@ -419,20 +933,29 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     }
 
     fn deserialize_i8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_i8(self.parse_integer()?)
+        visitor.visit_i8(
+            i8::try_from(self.parse_i64_value()?)
+                .map_err(|_| self.error("integer is out of range"))?,
+        )
     }
 
     fn deserialize_i16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_i16(self.parse_integer()?)
+        visitor.visit_i16(
+            i16::try_from(self.parse_i64_value()?)
+                .map_err(|_| self.error("integer is out of range"))?,
+        )
     }
 
     fn deserialize_i32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_i32(self.parse_integer()?)
+        visitor.visit_i32(
+            i32::try_from(self.parse_i64_value()?)
+                .map_err(|_| self.error("integer is out of range"))?,
+        )
     }
 
     #[inline]
     fn deserialize_i64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_i64(self.parse_integer()?)
+        visitor.visit_i64(self.parse_i64_value()?)
     }
 
     fn deserialize_i128<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
@@ -440,20 +963,29 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     }
 
     fn deserialize_u8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_u8(self.parse_unsigned()?)
+        visitor.visit_u8(
+            u8::try_from(self.parse_u64_value()?)
+                .map_err(|_| self.error("integer is out of range"))?,
+        )
     }
 
     fn deserialize_u16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_u16(self.parse_unsigned()?)
+        visitor.visit_u16(
+            u16::try_from(self.parse_u64_value()?)
+                .map_err(|_| self.error("integer is out of range"))?,
+        )
     }
 
     fn deserialize_u32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_u32(self.parse_unsigned()?)
+        visitor.visit_u32(
+            u32::try_from(self.parse_u64_value()?)
+                .map_err(|_| self.error("integer is out of range"))?,
+        )
     }
 
     #[inline]
     fn deserialize_u64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_u64(self.parse_unsigned()?)
+        visitor.visit_u64(self.parse_u64_value()?)
     }
 
     fn deserialize_u128<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
@@ -461,12 +993,12 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     }
 
     fn deserialize_f32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_f32(self.parse_float()?)
+        visitor.visit_f32(self.parse_f32_value()?)
     }
 
     #[inline]
     fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_f64(self.parse_float()?)
+        visitor.visit_f64(self.parse_f64_value()?)
     }
 
     fn deserialize_char<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
@@ -530,10 +1062,14 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
 
     fn deserialize_newtype_struct<V: Visitor<'de>>(
         self,
-        _name: &'static str,
+        name: &'static str,
         visitor: V,
     ) -> Result<V::Value> {
-        visitor.visit_newtype_struct(self)
+        if name == RAW_JSON_TOKEN {
+            visitor.visit_borrowed_str(self.capture_raw()?)
+        } else {
+            visitor.visit_newtype_struct(self)
+        }
     }
 
     #[inline]
@@ -615,7 +1151,8 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     }
 
     fn deserialize_ignored_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        self.deserialize_any(visitor)
+        self.skip_value()?;
+        visitor.visit_unit()
     }
 }
 
@@ -640,13 +1177,6 @@ impl Deserializer<'_> {
             .raw
             .parse()
             .map_err(|_| self.error("integer is out of range"))
-    }
-
-    fn parse_float<T: str::FromStr>(&mut self) -> Result<T> {
-        self.parse_number()?
-            .raw
-            .parse()
-            .map_err(|_| self.error("number is out of range"))
     }
 }
 

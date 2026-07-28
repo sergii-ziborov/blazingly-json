@@ -1,4 +1,4 @@
-use blazingly_json::{Value, from_str, to_string};
+use blazingly_json::{from_str, to_string, RawJson, Value};
 use proptest::prelude::*;
 
 fn leaf() -> impl Strategy<Value = serde_json::Value> {
@@ -31,5 +31,26 @@ proptest! {
         let reencoded = to_string(&ours).unwrap();
         let final_value: serde_json::Value = serde_json::from_str(&reencoded).unwrap();
         prop_assert_eq!(final_value, reference);
+    }
+
+    #[test]
+    fn raw_values_preserve_and_defer_supported_json(reference in json_value()) {
+        let encoded = serde_json::to_string(&reference).unwrap();
+        let raw: RawJson<'_> = from_str(&encoded).unwrap();
+        prop_assert_eq!(raw.get(), encoded.as_str());
+        let materialized = raw.deserialize::<Value>().unwrap();
+        let reencoded = to_string(&materialized).unwrap();
+        let final_value: serde_json::Value = serde_json::from_str(&reencoded).unwrap();
+        prop_assert_eq!(final_value, reference);
+    }
+
+    #[test]
+    fn typed_f64_round_trips_reference_encoding_exactly(reference in any::<f64>().prop_filter(
+        "JSON serializes only finite floats as numbers",
+        |value| value.is_finite(),
+    )) {
+        let encoded = serde_json::to_string(&reference).unwrap();
+        let ours: f64 = from_str(&encoded).unwrap();
+        prop_assert_eq!(ours.to_bits(), reference.to_bits());
     }
 }
