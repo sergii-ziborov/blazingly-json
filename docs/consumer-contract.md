@@ -22,6 +22,8 @@ modified by this work.
   `to_value`;
 - borrowed, validated raw sub-values for routing an MCP/JSON-RPC envelope
   without constructing a complete mutable DOM;
+- an allocation-free recognizer primitive for generated canonical layouts,
+  where any mismatch falls back to the general parser;
 - a slice deserializer usable by `serde_path_to_error`;
 - string, bool, signed, unsigned, float, null, array, and object values;
 - object/array access, mutation, indexing, JSON Pointer, and `take`;

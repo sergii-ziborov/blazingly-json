@@ -1,4 +1,4 @@
-use blazingly_json::{RawJson, Value};
+use blazingly_json::{CanonicalScanner, RawJson, Value};
 use serde::Deserialize;
 use stats_alloc::{Region, Stats, StatsAlloc, INSTRUMENTED_SYSTEM};
 use std::alloc::System;
@@ -48,6 +48,31 @@ fn dispatch_current_mcport(input: &[u8]) {
     }
 }
 
+fn dispatch_canonical_tool(input: &[u8]) -> bool {
+    let Some((id, name, query, limit, include_source)) = (|| {
+        let mut scanner = CanonicalScanner::new(input);
+        scanner.literal(br#"{"jsonrpc":"2.0","id":"#)?;
+        let id = scanner.plain_string()?;
+        scanner.literal(br#","method":"tools/call","params":{"name":"#)?;
+        let name = scanner.plain_string()?;
+        scanner.literal(br#","arguments":{"query":"#)?;
+        let query = scanner.plain_string()?;
+        scanner.literal(br#","limit":"#)?;
+        let limit = scanner.unsigned()?;
+        scanner.literal(br#","include_source":"#)?;
+        let include_source = scanner.boolean()?;
+        scanner.literal(b"}}}")?;
+        scanner
+            .is_finished()
+            .then_some((id, name, query, limit, include_source))
+    })() else {
+        return false;
+    };
+
+    black_box((id, name, query, limit, include_source));
+    true
+}
+
 fn bounded_f64(value: usize) -> f64 {
     f64::from(u32::try_from(value).expect("benchmark value fits u32"))
 }
@@ -79,6 +104,14 @@ fn compare(name: &str, input: &[u8]) {
 }
 
 fn main() {
+    const ITERATIONS: usize = 100_000;
+
     compare("ping", PING);
     compare("tools/call", TOOL_CALL);
+
+    let canonical = Region::new(GLOBAL);
+    for _ in 0..ITERATIONS {
+        assert!(dispatch_canonical_tool(black_box(TOOL_CALL)));
+    }
+    report("canonical typed tool", canonical.change(), ITERATIONS);
 }

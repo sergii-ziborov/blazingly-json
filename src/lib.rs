@@ -1,5 +1,6 @@
 //! Focused JSON parsing and encoding for Blazingly protocol workloads.
 
+mod canonical;
 mod de;
 mod error;
 mod map;
@@ -9,6 +10,7 @@ mod ser;
 mod value;
 mod value_de;
 
+pub use canonical::CanonicalScanner;
 pub use de::{from_slice, from_str, Cursor, Deserializer, Field, Object};
 pub use error::{Error, Result};
 pub use map::Map;

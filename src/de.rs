@@ -75,6 +75,7 @@ pub struct Field<'cursor, 'de> {
 impl<'de> Cursor<'de> {
     /// Creates a cursor over a byte slice.
     #[must_use]
+    #[inline]
     pub const fn from_slice(input: &'de [u8]) -> Self {
         Self {
             deserializer: Deserializer::from_slice(input),
@@ -83,6 +84,7 @@ impl<'de> Cursor<'de> {
 
     /// Creates a cursor over a UTF-8 string.
     #[must_use]
+    #[inline]
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(input: &'de str) -> Self {
         Self {
@@ -98,6 +100,7 @@ impl<'de> Cursor<'de> {
     ///
     /// Returns an error for malformed JSON or when the next value is not an
     /// object.
+    #[inline]
     pub fn object<T>(
         &mut self,
         visitor: impl FnOnce(&mut Object<'_, 'de>) -> Result<T>,
@@ -110,6 +113,7 @@ impl<'de> Cursor<'de> {
     /// # Errors
     ///
     /// Returns an error when non-whitespace input remains.
+    #[inline]
     pub fn end(&mut self) -> Result<()> {
         self.deserializer.end()
     }
@@ -121,6 +125,7 @@ impl<'de> Object<'_, 'de> {
     /// # Errors
     ///
     /// Returns an error for malformed object syntax.
+    #[inline]
     pub fn next_field(&mut self) -> Result<Option<Field<'_, 'de>>> {
         if self.finished {
             return Ok(None);
@@ -148,6 +153,7 @@ impl<'de> Object<'_, 'de> {
         }))
     }
 
+    #[inline]
     fn finish(&mut self) -> Result<()> {
         while let Some(field) = self.next_field()? {
             field.skip()?;
@@ -167,6 +173,7 @@ impl Drop for Object<'_, '_> {
 impl<'de> Field<'_, 'de> {
     /// Returns this member's decoded field name.
     #[must_use]
+    #[inline]
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -176,6 +183,7 @@ impl<'de> Field<'_, 'de> {
     /// # Errors
     ///
     /// Returns an error for malformed JSON.
+    #[inline]
     pub fn skip(self) -> Result<()> {
         self.deserializer.skip_value()
     }
@@ -185,6 +193,7 @@ impl<'de> Field<'_, 'de> {
     /// # Errors
     ///
     /// Returns an error for malformed JSON.
+    #[inline]
     pub fn raw(self) -> Result<crate::RawJson<'de>> {
         self.deserializer.capture_raw().map(crate::RawJson::new)
     }
@@ -194,6 +203,7 @@ impl<'de> Field<'_, 'de> {
     /// # Errors
     ///
     /// Returns an error when the value is not a valid JSON string.
+    #[inline]
     pub fn string(self) -> Result<Cow<'de, str>> {
         self.deserializer.parse_string()
     }
@@ -203,6 +213,7 @@ impl<'de> Field<'_, 'de> {
     /// # Errors
     ///
     /// Returns an error for malformed JSON or a type mismatch.
+    #[inline]
     pub fn deserialize<T: Deserialize<'de>>(self) -> Result<T> {
         T::deserialize(&mut *self.deserializer)
     }
@@ -214,11 +225,13 @@ impl<'de> Field<'_, 'de> {
     /// # Errors
     ///
     /// Returns an error for malformed JSON or when the value is not an object.
+    #[inline]
     pub fn object<T>(self, visitor: impl FnOnce(&mut Object<'_, 'de>) -> Result<T>) -> Result<T> {
         visit_object(self.deserializer, visitor)
     }
 }
 
+#[inline]
 fn visit_object<'de, T>(
     deserializer: &mut Deserializer<'de>,
     visitor: impl FnOnce(&mut Object<'_, 'de>) -> Result<T>,
@@ -275,6 +288,7 @@ impl<'de> Deserializer<'de> {
         Error::syntax(message, self.input, self.index)
     }
 
+    #[inline]
     fn utf8_source(&mut self) -> Result<&'de str> {
         if let Some(source) = self.source {
             return Ok(source);
@@ -324,6 +338,7 @@ impl<'de> Deserializer<'de> {
         }
     }
 
+    #[inline]
     fn enter(&mut self) -> Result<()> {
         if self.depth >= MAX_DEPTH {
             return Err(self.error("recursion limit exceeded"));
@@ -332,10 +347,12 @@ impl<'de> Deserializer<'de> {
         Ok(())
     }
 
+    #[inline]
     fn leave(&mut self) {
         self.depth = self.depth.saturating_sub(1);
     }
 
+    #[inline]
     fn parse_string(&mut self) -> Result<Cow<'de, str>> {
         self.skip_whitespace();
         if self.input.get(self.index) != Some(&b'"') {
@@ -445,6 +462,7 @@ impl<'de> Deserializer<'de> {
         }
     }
 
+    #[inline]
     fn skip_string(&mut self) -> Result<()> {
         self.skip_whitespace();
         if self.input.get(self.index) != Some(&b'"') {
@@ -499,6 +517,7 @@ impl<'de> Deserializer<'de> {
         }
     }
 
+    #[inline]
     fn skip_value(&mut self) -> Result<()> {
         match self.peek() {
             Some(b'n') => self.parse_literal(b"null"),
@@ -513,6 +532,7 @@ impl<'de> Deserializer<'de> {
         }
     }
 
+    #[inline]
     fn skip_array(&mut self) -> Result<()> {
         self.expect_byte(b'[')?;
         self.enter()?;
@@ -537,6 +557,7 @@ impl<'de> Deserializer<'de> {
         result
     }
 
+    #[inline]
     fn skip_object(&mut self) -> Result<()> {
         self.expect_byte(b'{')?;
         self.enter()?;
@@ -563,6 +584,7 @@ impl<'de> Deserializer<'de> {
         result
     }
 
+    #[inline]
     fn capture_raw(&mut self) -> Result<&'de str> {
         self.skip_whitespace();
         let start = self.index;

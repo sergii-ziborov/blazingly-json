@@ -22,6 +22,8 @@ still release gates. No production consumer has been switched.
 - owned `Value` only where callers need a mutable DOM;
 - allocation-free `RawJson` borrowing for envelopes that can defer payload
   decoding;
+- allocation-free `CanonicalScanner` recognition for generated or
+  protocol-specific layouts, with mandatory general-parser fallback;
 - optimized paths for small JSON-RPC, HTTP, JWT, config, snapshot, and JSONL
   payloads;
 - correctness is established before performance claims.
@@ -56,6 +58,28 @@ let call: Call<'_> = blazingly_json::from_str(
 )?;
 let arguments = call.arguments.deserialize::<Value>()?;
 # Ok::<(), blazingly_json::Error>(())
+```
+
+## Schema-aware canonical path
+
+When both ends produce one known compact layout, `CanonicalScanner` can match
+fixed structure and borrow typed fields without building a DOM. A mismatch is
+not a JSON error: callers must fall back to `Cursor` or `from_slice`, and a
+successful recognizer must consume the whole input.
+
+```rust
+use blazingly_json::CanonicalScanner;
+
+let input = br#"{"method":"search","limit":20}"#;
+let mut scanner = CanonicalScanner::new(input);
+scanner.literal(br#"{"method":"#).unwrap();
+let method = scanner.plain_string().unwrap();
+scanner.literal(br#","limit":"#).unwrap();
+let limit = scanner.unsigned().unwrap();
+scanner.literal(b"}").unwrap();
+
+assert!(scanner.is_finished());
+assert_eq!((method, limit), ("search", 20));
 ```
 
 ## Development gates

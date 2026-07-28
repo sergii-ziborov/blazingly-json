@@ -70,6 +70,27 @@ product gain therefore comes from the low-allocation protocol design and
 direct response serialization, not from claiming that every primitive parser
 operation beats every competitor.
 
+## Canonical typed MCP path
+
+For a generated compact `tools/call` layout, `CanonicalScanner` recognizes the
+complete byte shape, borrows three strings, parses one `u64` and one boolean,
+and falls back to the strict `Cursor` on any mismatch. Across three consecutive
+24-round runs:
+
+| Path | Median range | Relative to canonical |
+| --- | ---: | ---: |
+| canonical typed recognizer | 105.36-127.66 ns | 1.00x |
+| strict order-independent `Cursor` | 390.25-485.27 ns | 3.46-4.00x slower |
+| `serde_json` typed derive | 491.99-688.82 ns | 4.45-5.67x slower |
+
+The canonical typed path performs zero allocations. This is the first parser
+result in the project that clears the 2-3x target, but its scope is deliberately
+narrow: exact field order, compact separators, plain strings, and a known
+schema. Whitespace, reordered fields, escapes, other valid JSON shapes, or
+unknown tool schemas take the strict fallback. This result is evidence for
+generated MCP tool codecs, not a claim that the general JSON parser is 5x
+faster than `serde_json`.
+
 ## mcport end to end
 
 The full model includes request parsing, method dispatch, MCP result
