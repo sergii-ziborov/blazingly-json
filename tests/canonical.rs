@@ -1,4 +1,4 @@
-use blazingly_json::{CanonicalScanner, Cursor};
+use blazingly_json::{CanonicalBytesScanner, CanonicalScanner, JsonCursor};
 
 #[derive(Debug, Eq, PartialEq)]
 struct Call<'a> {
@@ -67,7 +67,7 @@ fn mismatch_is_a_fallback_signal_not_partial_success() {
         ),
     ] {
         assert!(canonical_call(input).is_none());
-        let mut fallback = Cursor::from_str(input);
+        let mut fallback = JsonCursor::from_str(input);
         let parsed = fallback.object(|_| Ok(()));
         if valid_general_json {
             parsed.unwrap();
@@ -81,12 +81,15 @@ fn mismatch_is_a_fallback_signal_not_partial_success() {
 #[test]
 fn invalid_utf8_never_becomes_a_borrowed_string() {
     let input = b"\"\xff\"";
-    assert!(CanonicalScanner::from_slice(input).is_none());
+    let mut scanner = CanonicalBytesScanner::new(input);
+    assert!(scanner.plain_string().is_none());
+    let mut scanner = CanonicalBytesScanner::new(input);
+    assert!(scanner.plain_ascii_string().is_none());
 }
 
 #[test]
 fn byte_input_is_validated_once_before_matching() {
-    let mut scanner = CanonicalScanner::from_slice(br#"{"enabled":true}"#).unwrap();
+    let mut scanner = CanonicalBytesScanner::new(br#"{"enabled":true}"#);
     scanner.literal(r#"{"enabled":"#).unwrap();
     assert_eq!(scanner.boolean(), Some(true));
     scanner.literal("}").unwrap();

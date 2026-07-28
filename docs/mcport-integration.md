@@ -18,7 +18,7 @@ implemented and tested in an isolated copy against the real crate source.
 The next integration layer can attach a generated canonical recognizer to a
 typed tool handler. Measured matching is 6.55-7.43x faster than the equivalent
 `serde_json` typed derive and allocates nothing. The existing order-independent
-`Cursor` remains the mandatory fallback, so ordinary MCP clients are not
+`JsonCursor` remains the mandatory fallback, so ordinary MCP clients are not
 required to emit the canonical field order.
 
 The builder shape tested in the spike is:

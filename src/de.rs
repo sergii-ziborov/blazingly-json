@@ -228,14 +228,14 @@ pub struct Deserializer<'de> {
 
 /// A low-level, allocation-free cursor for routing selected object fields.
 ///
-/// Prefer normal Serde deserialization for application models. `Cursor` is
+/// Prefer normal Serde deserialization for application models. `JsonCursor` is
 /// intended for protocol envelopes whose hot path must inspect a few fields
 /// and defer large nested values as [`crate::RawJson`].
-pub struct Cursor<'de> {
+pub struct JsonCursor<'de> {
     deserializer: Deserializer<'de>,
 }
 
-/// Streaming view over one JSON object visited by [`Cursor::object`].
+/// Streaming view over one JSON object visited by [`JsonCursor::object`].
 pub struct Object<'cursor, 'de> {
     deserializer: &'cursor mut Deserializer<'de>,
     first: bool,
@@ -249,7 +249,7 @@ pub struct Field<'cursor, 'de> {
     deserializer: &'cursor mut Deserializer<'de>,
 }
 
-impl<'de> Cursor<'de> {
+impl<'de> JsonCursor<'de> {
     /// Creates a cursor over a byte slice.
     #[must_use]
     #[inline]

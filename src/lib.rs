@@ -11,8 +11,8 @@ mod ser;
 pub mod value;
 mod value_de;
 
-pub use canonical::CanonicalScanner;
-pub use de::{from_slice, from_str, Cursor, Deserializer, Field, Object};
+pub use canonical::{CanonicalBytesScanner, CanonicalScanner};
+pub use de::{from_slice, from_str, Deserializer, Field, JsonCursor, Object};
 pub use error::{Error, Result};
 pub use map::Map;
 pub use number::Number;
