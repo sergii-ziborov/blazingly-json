@@ -1,46 +1,133 @@
 # blazingly-json
 
-`blazingly-json` is a focused, Tokio-free JSON engine for the small and
-medium protocol payloads used by Blazingly, MCP servers, Weavatrix, and
-RadioChron.
+[![CI](https://github.com/sergii-ziborov/blazingly-json/actions/workflows/ci.yml/badge.svg)](https://github.com/sergii-ziborov/blazingly-json/actions/workflows/ci.yml)
 
-The project is intentionally not a clone of every `serde_json` feature. Its
-compatibility boundary is derived from production call sites in those four
-consumers, then tested differentially against `serde_json`.
+Focused, safe, Tokio-free JSON for MCP, JSON-RPC, API, config, snapshot, and
+JSONL workloads.
 
-Current status: pre-release. Differential/property tests and isolated consumer
-compile/test probes pass; fuzzing and cross-platform performance evidence are
-still release gates. No production consumer has been switched.
+`blazingly-json` is not an incomplete reimplementation of every
+`serde_json` feature. Its supported surface was derived from real call sites
+in mcport, Weavatrix Rust, RadioChron, Blazingly, and BlazingAPI, then tested
+differentially against `serde_json`.
 
-## Design constraints
+The general compatible parser is only modestly faster. The large gain comes
+from changing protocol architecture: borrow the envelope, avoid a mutable DOM,
+serialize responses directly, and use an exact schema-aware recognizer where
+the producer emits a canonical layout.
 
-- no Tokio, Hyper, or Axum;
-- no runtime JSON dependency;
-- Rust 1.78 minimum supported version;
-- strict RFC 8259 parsing;
-- Serde-compatible typed encoding and decoding;
-- owned `Value` only where callers need a mutable DOM;
-- allocation-free `RawJson` borrowing for envelopes that can defer payload
-  decoding;
-- allocation-free `CanonicalScanner` recognition for generated or
-  protocol-specific layouts, with mandatory general-parser fallback;
-- optimized paths for small JSON-RPC, HTTP, JWT, config, snapshot, and JSONL
-  payloads;
-- correctness is established before performance claims.
+Current status: pre-release. The crate passes differential/property tests,
+Rust 1.78, strict Clippy, rustdoc, packaging, Linux CI, and Windows CI. No
+production consumer has been switched yet.
 
-See [docs/consumer-contract.md](docs/consumer-contract.md) for the audited API
-surface and exclusions. See [docs/benchmarks.md](docs/benchmarks.md) for the
-current local comparison against `serde_json`. See
-[docs/consumer-validation.md](docs/consumer-validation.md) for temporary
-drop-in compile and test probes against all four consumer families. See
-[docs/competitors.md](docs/competitors.md) for the JSON and MCP competitor
-boundary.
+## Performance summary
 
-## Zero-copy envelope path
+Local Windows measurements on an Intel Core Ultra 7 255U. Paired harnesses
+alternate engine order and report medians. These are workload measurements,
+not universal parser claims.
 
-`RawJson` validates a nested value and borrows its exact input bytes without
-building a DOM. A protocol can decode only its routing fields and materialize
-the payload only when a handler needs it:
+### Canonical typed MCP call
+
+A generated compact `tools/call` recognizer borrows three strings, parses a
+`u64` and a boolean, verifies complete consumption, and falls back to the
+strict order-independent parser on any mismatch.
+
+| Path | Median range | Compared with canonical `&str` |
+| --- | ---: | ---: |
+| `CanonicalScanner` over prevalidated `&str` | 56.24-74.61 ns | 1.00x |
+| `CanonicalScanner::from_slice` including UTF-8 validation | 66.30-94.02 ns | 1.10-1.26x slower |
+| strict order-independent `Cursor` | 295.31-421.29 ns | 5.26-5.65x slower |
+| typed `serde_json` derive | 368.26-554.43 ns | 6.55-7.43x slower |
+
+Both canonical paths allocate zero bytes. Even when UTF-8 validation is
+included, the measured advantage over typed `serde_json` remains 5.55-5.99x.
+
+This path intentionally accepts only its exact schema, field order, compact
+separators, and plain strings. Whitespace, reordered fields, escaped strings,
+or another schema are not treated as errors: they take the general parser
+fallback.
+
+### MCP runtime architecture
+
+Borrowed request routing plus direct response serialization compared with
+mcport's original owned-`Value` + clone implementation:
+
+| Request | Borrowed path | Original mcport | Speedup |
+| --- | ---: | ---: | ---: |
+| ping | 344.93 ns | 1,425.04 ns | 4.13x |
+| initialize | 1,014.87 ns | 6,683.85 ns | 6.59x |
+| tools/list | 2,524.99 ns | 7,987.72 ns | 3.16x |
+| tools/call | 2,103.43 ns | 7,298.68 ns | 3.47x |
+
+Allocation measurements for request dispatch:
+
+| Request | Borrowed path | Original mcport |
+| --- | ---: | ---: |
+| ping | 0 allocations / 0 bytes | 8 allocations / 670 bytes |
+| tools/call with owned arguments | 5 allocations / 668 bytes | 27 allocations / 2,702 bytes |
+| canonical typed tools/call | 0 allocations / 0 bytes | 27 allocations / 2,702 bytes |
+
+### Compatible API and large payloads
+
+The compatible owned/typed path does not reach a multiple-times speedup:
+
+| Workload | blazingly-json | serde_json | Difference |
+| --- | ---: | ---: | ---: |
+| MCP mutable `Value` parse | 2.195 us | 2.313 us | +5.37% |
+| MCP typed parse | 1.391 us | 1.423 us | +2.33% |
+| MCP typed encode | 420.75 ns | 427.20 ns | +1.53% |
+| Weavatrix-like graph parse | 77.72 us | 80.00 us | +2.92% |
+| Weavatrix-like graph encode | 22.13 us | 24.70 us | +11.64% |
+| Cargo artifact JSONL parse | 1.650 us | 1.850 us | +12.13% |
+| 1,000,000 `u64` values | 254.9 MiB/s | 249.8 MiB/s | +2.01% |
+| 1,000,000 typed records, 80.98 MiB | 150.1 MiB/s | 147.6 MiB/s | +1.70% |
+| 1,000,000 varied MCP `Value` parses | 69.7 MiB/s | 68.0 MiB/s | +2.48% |
+
+Parsing one million owned records makes exactly 2,000,001 allocations and
+retains 100.27 MiB with either engine: the owned strings and vectors dominate,
+not the parser. Minimal stripped Windows executables are also effectively tied:
+990,208 bytes for `blazingly-json` and 989,184 bytes for `serde_json`.
+
+The conclusion is deliberate: replacing `serde_json` with another compatible
+owned DOM cannot honestly promise 2-3x less memory or 2-3x more speed. The
+canonical and borrowed APIs exist to remove that ownership work.
+
+## Usage
+
+Until the first crates.io release:
+
+```toml
+[dependencies]
+blazingly-json = { git = "https://github.com/sergii-ziborov/blazingly-json" }
+serde = { version = "1", features = ["derive"] }
+```
+
+After publication, the Git dependency becomes:
+
+```toml
+blazingly-json = "0.1"
+```
+
+### Serde-compatible typed JSON
+
+```rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Request<'a> {
+    method: &'a str,
+    limit: u64,
+}
+
+let request: Request<'_> =
+    blazingly_json::from_str(r#"{"method":"search","limit":20}"#)?;
+let encoded = blazingly_json::to_string(&request)?;
+# Ok::<(), blazingly_json::Error>(())
+```
+
+### Zero-copy envelope
+
+`RawJson` validates a nested value and borrows its exact input without building
+a DOM. The payload is materialized only if a selected handler needs it.
 
 ```rust
 use blazingly_json::{RawJson, Value};
@@ -60,40 +147,124 @@ let arguments = call.arguments.deserialize::<Value>()?;
 # Ok::<(), blazingly_json::Error>(())
 ```
 
-## Schema-aware canonical path
+### Order-independent protocol cursor
 
-When both ends produce one known compact layout, `CanonicalScanner` can match
-fixed structure and borrow typed fields without building a DOM. A mismatch is
-not a JSON error: callers must fall back to `Cursor` or `from_slice`, and a
-successful recognizer must consume the whole input. `new(&str)` reuses UTF-8
-validation already performed by line-oriented stdio; `from_slice(&[u8])`
-validates a byte payload once before matching.
+`Cursor` visits only routing fields, skips unknown values safely, and validates
+the complete document.
+
+```rust
+use blazingly_json::Cursor;
+
+let mut method = None;
+let mut cursor = Cursor::from_str(r#"{"jsonrpc":"2.0","method":"ping"}"#);
+cursor.object(|request| {
+    while let Some(field) = request.next_field()? {
+        match field.name() {
+            "method" => method = Some(field.string()?),
+            _ => field.skip()?,
+        }
+    }
+    Ok(())
+})?;
+cursor.end()?;
+assert_eq!(method.as_deref(), Some("ping"));
+# Ok::<(), blazingly_json::Error>(())
+```
+
+### Schema-aware canonical path
+
+Use this only as a recognizer with a mandatory fallback. A successful
+recognizer must consume the complete input.
 
 ```rust
 use blazingly_json::CanonicalScanner;
 
 let input = r#"{"method":"search","limit":20}"#;
 let mut scanner = CanonicalScanner::new(input);
-scanner.literal(r#"{"method":"#).unwrap();
-let method = scanner.plain_string().unwrap();
-scanner.literal(r#","limit":"#).unwrap();
-let limit = scanner.unsigned().unwrap();
-scanner.literal("}").unwrap();
+let recognized = (|| {
+    scanner.literal(r#"{"method":"#)?;
+    let method = scanner.plain_string()?;
+    scanner.literal(r#","limit":"#)?;
+    let limit = scanner.unsigned()?;
+    scanner.literal("}")?;
+    scanner.is_finished().then_some((method, limit))
+})();
 
-assert!(scanner.is_finished());
-assert_eq!((method, limit), ("search", 20));
+if let Some((method, limit)) = recognized {
+    assert_eq!((method, limit), ("search", 20));
+} else {
+    // Parse with Cursor or from_str: the input may still be valid JSON.
+}
 ```
 
-## Development gates
+## Supported surface
+
+- `Value`, `Map<String, Value>`, `Number`, and `json!`;
+- `from_str`, `from_slice`, `from_value`;
+- `to_string`, pretty/string/vector/writer variants, and `to_value`;
+- Serde structs, maps, sequences, options, enums, newtypes, and bytes;
+- string, boolean, signed, unsigned, float, null, array, and object values;
+- access, mutation, indexing, JSON Pointer, and `take`;
+- validated borrowed `RawJson`;
+- routing-oriented `Cursor`;
+- exact-layout `CanonicalScanner`;
+- strict RFC 8259 parsing with recursion limits and source locations.
+
+Deliberate 0.1 exclusions:
+
+- arbitrary-precision numbers;
+- JSON5, comments, trailing commas, NaN, and infinities;
+- `preserve_order`;
+- synchronous `Read`-based incremental parsing;
+- compatibility with private `serde_json` implementation details.
+
+## Dependencies and safety
+
+The runtime dependencies are `serde`, `memchr`, `itoa`, `lexical-core`, and
+`zmij`. `serde_json` is a development-only oracle for differential tests and
+benchmarks. Tokio, Hyper, Axum, and unsafe code are absent; `unsafe_code` is
+forbidden at the crate level.
+
+## Competitive position
+
+- `serde_json`: broad compatibility, maturity, ecosystem, and an excellent
+  borrowed `RawValue`;
+- `sonic-rs`: SIMD parsing and lazy field access;
+- `simd-json`: SIMD tape plus borrowed and owned DOMs, with mutable-input and
+  unsafe-code trade-offs;
+- `serde_json_borrow`: borrowed DOM and reduced string allocation;
+- `jiter`: iterator/schema-oriented parsing plus Serde support.
+
+`blazingly-json` does not claim to beat every engine on every document. Its
+target is safe, portable, low-MSRV protocol performance and generated
+schema-aware MCP/API codecs with a strict fallback.
+
+See:
+
+- [benchmark methodology and full results](docs/benchmarks.md);
+- [consumer-derived compatibility contract](docs/consumer-contract.md);
+- [consumer compile/test probes](docs/consumer-validation.md);
+- [competitor and MCP runtime analysis](docs/competitors.md);
+- [mcport integration spike](docs/mcport-integration.md).
+
+## Verification
 
 ```text
-cargo fmt --check
-cargo check --all-targets
+cargo fmt --all -- --check
 cargo test
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
+cargo +1.78 check --lib
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+cargo package
+
 cargo bench --bench paired_comparison
 cargo bench --bench large_payload
+cargo bench --bench allocation_comparison
 cargo bench --bench mcp_fast_path
 cargo bench --bench mcp_allocations
 cargo bench --bench mcport_end_to_end
 ```
+
+## License
+
+MIT
