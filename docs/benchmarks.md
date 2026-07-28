@@ -73,15 +73,17 @@ operation beats every competitor.
 ## Canonical typed MCP path
 
 For a generated compact `tools/call` layout, `CanonicalScanner` recognizes the
-complete byte shape, borrows three strings, parses one `u64` and one boolean,
-and falls back to the strict `Cursor` on any mismatch. Across three consecutive
-24-round runs:
+complete shape, borrows three strings, parses one `u64` and one boolean, and
+falls back to the strict `Cursor` on any mismatch. The `&str` path reuses UTF-8
+validation already performed by `mcport`'s line reader; the byte path validates
+the complete input once. Across consecutive 24-round runs:
 
 | Path | Median range | Relative to canonical |
 | --- | ---: | ---: |
-| canonical typed recognizer | 105.36-127.66 ns | 1.00x |
-| strict order-independent `Cursor` | 390.25-485.27 ns | 3.46-4.00x slower |
-| `serde_json` typed derive | 491.99-688.82 ns | 4.45-5.67x slower |
+| canonical typed recognizer, prevalidated `&str` | 56.24-74.61 ns | 1.00x |
+| canonical typed recognizer, validated bytes | 66.30-94.02 ns | 1.10-1.26x slower |
+| strict order-independent `Cursor` | 295.31-421.29 ns | 5.26-5.65x slower |
+| `serde_json` typed derive | 368.26-554.43 ns | 6.55-7.43x slower |
 
 The canonical typed path performs zero allocations. This is the first parser
 result in the project that clears the 2-3x target, but its scope is deliberately
@@ -89,7 +91,8 @@ narrow: exact field order, compact separators, plain strings, and a known
 schema. Whitespace, reordered fields, escapes, other valid JSON shapes, or
 unknown tool schemas take the strict fallback. This result is evidence for
 generated MCP tool codecs, not a claim that the general JSON parser is 5x
-faster than `serde_json`.
+faster than `serde_json`. Including one full UTF-8 validation for byte input,
+the measured advantage over typed `serde_json` remains 5.55-5.99x.
 
 ## mcport end to end
 

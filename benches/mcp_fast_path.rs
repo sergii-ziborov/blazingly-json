@@ -70,6 +70,7 @@ struct ReferenceArguments<'a> {
 const PING: &[u8] = br#"{"jsonrpc":"2.0","id":17,"method":"ping"}"#;
 const INITIALIZE: &[u8] = br#"{"jsonrpc":"2.0","id":"init-1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"Codex","version":"1.0"}}}"#;
 const TOOL_CALL: &[u8] = br#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}}"#;
+const TOOL_CALL_STR: &str = r#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}}"#;
 
 fn dispatch_fast(input: &[u8]) {
     let request: FastRequest<'_> = blazingly_json::from_slice(input).unwrap();
@@ -239,29 +240,45 @@ fn dispatch_reference_typed(input: &[u8]) {
     ));
 }
 
-fn dispatch_canonical_typed(input: &[u8]) -> bool {
-    let Some((id, name, query, limit, include_source)) = (|| {
-        let mut scanner = CanonicalScanner::new(input);
-        scanner.literal(br#"{"jsonrpc":"2.0","id":"#)?;
-        let id = scanner.plain_string()?;
-        scanner.literal(br#","method":"tools/call","params":{"name":"#)?;
-        let name = scanner.plain_string()?;
-        scanner.literal(br#","arguments":{"query":"#)?;
-        let query = scanner.plain_string()?;
-        scanner.literal(br#","limit":"#)?;
-        let limit = scanner.unsigned()?;
-        scanner.literal(br#","include_source":"#)?;
-        let include_source = scanner.boolean()?;
-        scanner.literal(b"}}}")?;
-        scanner
-            .is_finished()
-            .then_some((id, name, query, limit, include_source))
-    })() else {
+#[inline]
+fn recognize_canonical_tool(
+    mut scanner: CanonicalScanner<'_>,
+) -> Option<(&str, &str, &str, u64, bool)> {
+    scanner.literal(r#"{"jsonrpc":"2.0","id":"#)?;
+    let id = scanner.plain_string()?;
+    scanner.literal(r#","method":"tools/call","params":{"name":"#)?;
+    let name = scanner.plain_string()?;
+    scanner.literal(r#","arguments":{"query":"#)?;
+    let query = scanner.plain_string()?;
+    scanner.literal(r#","limit":"#)?;
+    let limit = scanner.unsigned()?;
+    scanner.literal(r#","include_source":"#)?;
+    let include_source = scanner.boolean()?;
+    scanner.literal("}}}")?;
+    scanner
+        .is_finished()
+        .then_some((id, name, query, limit, include_source))
+}
+
+fn dispatch_canonical_typed(input: &str) -> bool {
+    let Some(fields) = recognize_canonical_tool(CanonicalScanner::new(input)) else {
+        dispatch_cursor_typed(input.as_bytes());
+        return false;
+    };
+    black_box(fields);
+    true
+}
+
+fn dispatch_canonical_typed_bytes(input: &[u8]) -> bool {
+    let Some(scanner) = CanonicalScanner::from_slice(input) else {
         dispatch_cursor_typed(input);
         return false;
     };
-
-    black_box((id, name, query, limit, include_source));
+    let Some(fields) = recognize_canonical_tool(scanner) else {
+        dispatch_cursor_typed(input);
+        return false;
+    };
+    black_box(fields);
     true
 }
 
@@ -352,38 +369,46 @@ fn compare_typed_tool() {
     const ROUNDS: u32 = 24;
     dispatch_cursor_typed(TOOL_CALL);
     dispatch_reference_typed(TOOL_CALL);
-    assert!(dispatch_canonical_typed(TOOL_CALL));
+    assert!(dispatch_canonical_typed(TOOL_CALL_STR));
+    assert!(dispatch_canonical_typed_bytes(TOOL_CALL));
 
     let mut cursor_samples = Vec::with_capacity(ROUNDS as usize);
     let mut reference_samples = Vec::with_capacity(ROUNDS as usize);
     let mut canonical_samples = Vec::with_capacity(ROUNDS as usize);
+    let mut canonical_bytes_samples = Vec::with_capacity(ROUNDS as usize);
     for round in 0..ROUNDS {
         let mut cursor = || dispatch_cursor_typed(black_box(TOOL_CALL));
         let mut reference = || dispatch_reference_typed(black_box(TOOL_CALL));
         let mut canonical = || {
-            assert!(dispatch_canonical_typed(black_box(TOOL_CALL)));
+            assert!(dispatch_canonical_typed(black_box(TOOL_CALL_STR)));
         };
-        let mut times = [Duration::default(); 3];
-        for offset in 0..3 {
-            let slot = (round as usize + offset) % 3;
+        let mut canonical_bytes = || {
+            assert!(dispatch_canonical_typed_bytes(black_box(TOOL_CALL)));
+        };
+        let mut times = [Duration::default(); 4];
+        for offset in 0..4 {
+            let slot = (round as usize + offset) % 4;
             times[slot] = match slot {
                 0 => batch(ITERATIONS, &mut canonical),
-                1 => batch(ITERATIONS, &mut cursor),
+                1 => batch(ITERATIONS, &mut canonical_bytes),
+                2 => batch(ITERATIONS, &mut cursor),
                 _ => batch(ITERATIONS, &mut reference),
             };
         }
         canonical_samples.push(times[0].as_secs_f64() * 1e9 / f64::from(ITERATIONS));
-        cursor_samples.push(times[1].as_secs_f64() * 1e9 / f64::from(ITERATIONS));
-        reference_samples.push(times[2].as_secs_f64() * 1e9 / f64::from(ITERATIONS));
+        canonical_bytes_samples.push(times[1].as_secs_f64() * 1e9 / f64::from(ITERATIONS));
+        cursor_samples.push(times[2].as_secs_f64() * 1e9 / f64::from(ITERATIONS));
+        reference_samples.push(times[3].as_secs_f64() * 1e9 / f64::from(ITERATIONS));
     }
     let canonical = median(&mut canonical_samples);
+    let canonical_bytes = median(&mut canonical_bytes_samples);
     let cursor = median(&mut cursor_samples);
     let reference = median(&mut reference_samples);
     println!(
-        "{:<12} canonical={canonical:>9.2} ns cursor={cursor:>9.2} ns serde-typed={reference:>9.2} ns serde/canonical={:>5.2}x cursor/canonical={:>5.2}x",
+        "{:<12} canonical-str={canonical:>8.2} ns canonical-bytes={canonical_bytes:>8.2} ns cursor={cursor:>8.2} ns serde-typed={reference:>8.2} ns serde/str={:>5.2}x serde/bytes={:>5.2}x",
         "typed/call",
         reference / canonical,
-        cursor / canonical
+        reference / canonical_bytes
     );
 }
 

@@ -65,18 +65,20 @@ let arguments = call.arguments.deserialize::<Value>()?;
 When both ends produce one known compact layout, `CanonicalScanner` can match
 fixed structure and borrow typed fields without building a DOM. A mismatch is
 not a JSON error: callers must fall back to `Cursor` or `from_slice`, and a
-successful recognizer must consume the whole input.
+successful recognizer must consume the whole input. `new(&str)` reuses UTF-8
+validation already performed by line-oriented stdio; `from_slice(&[u8])`
+validates a byte payload once before matching.
 
 ```rust
 use blazingly_json::CanonicalScanner;
 
-let input = br#"{"method":"search","limit":20}"#;
+let input = r#"{"method":"search","limit":20}"#;
 let mut scanner = CanonicalScanner::new(input);
-scanner.literal(br#"{"method":"#).unwrap();
+scanner.literal(r#"{"method":"#).unwrap();
 let method = scanner.plain_string().unwrap();
-scanner.literal(br#","limit":"#).unwrap();
+scanner.literal(r#","limit":"#).unwrap();
 let limit = scanner.unsigned().unwrap();
-scanner.literal(b"}").unwrap();
+scanner.literal("}").unwrap();
 
 assert!(scanner.is_finished());
 assert_eq!((method, limit), ("search", 20));

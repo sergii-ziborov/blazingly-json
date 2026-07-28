@@ -26,6 +26,7 @@ struct FastParams<'a> {
 
 const PING: &[u8] = br#"{"jsonrpc":"2.0","id":17,"method":"ping"}"#;
 const TOOL_CALL: &[u8] = br#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}}"#;
+const TOOL_CALL_STR: &str = r#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}}"#;
 
 fn dispatch_fast(input: &[u8]) {
     let request: FastRequest<'_> = blazingly_json::from_slice(input).unwrap();
@@ -48,20 +49,20 @@ fn dispatch_current_mcport(input: &[u8]) {
     }
 }
 
-fn dispatch_canonical_tool(input: &[u8]) -> bool {
+fn dispatch_canonical_tool(input: &str) -> bool {
     let Some((id, name, query, limit, include_source)) = (|| {
         let mut scanner = CanonicalScanner::new(input);
-        scanner.literal(br#"{"jsonrpc":"2.0","id":"#)?;
+        scanner.literal(r#"{"jsonrpc":"2.0","id":"#)?;
         let id = scanner.plain_string()?;
-        scanner.literal(br#","method":"tools/call","params":{"name":"#)?;
+        scanner.literal(r#","method":"tools/call","params":{"name":"#)?;
         let name = scanner.plain_string()?;
-        scanner.literal(br#","arguments":{"query":"#)?;
+        scanner.literal(r#","arguments":{"query":"#)?;
         let query = scanner.plain_string()?;
-        scanner.literal(br#","limit":"#)?;
+        scanner.literal(r#","limit":"#)?;
         let limit = scanner.unsigned()?;
-        scanner.literal(br#","include_source":"#)?;
+        scanner.literal(r#","include_source":"#)?;
         let include_source = scanner.boolean()?;
-        scanner.literal(b"}}}")?;
+        scanner.literal("}}}")?;
         scanner
             .is_finished()
             .then_some((id, name, query, limit, include_source))
@@ -111,7 +112,7 @@ fn main() {
 
     let canonical = Region::new(GLOBAL);
     for _ in 0..ITERATIONS {
-        assert!(dispatch_canonical_tool(black_box(TOOL_CALL)));
+        assert!(dispatch_canonical_tool(black_box(TOOL_CALL_STR)));
     }
     report("canonical typed tool", canonical.change(), ITERATIONS);
 }

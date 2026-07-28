@@ -9,19 +9,19 @@ struct Call<'a> {
     include_source: bool,
 }
 
-fn canonical_call(input: &[u8]) -> Option<Call<'_>> {
+fn canonical_call(input: &str) -> Option<Call<'_>> {
     let mut scanner = CanonicalScanner::new(input);
-    scanner.literal(br#"{"jsonrpc":"2.0","id":"#)?;
+    scanner.literal(r#"{"jsonrpc":"2.0","id":"#)?;
     let id = scanner.plain_string()?;
-    scanner.literal(br#","method":"tools/call","params":{"name":"#)?;
+    scanner.literal(r#","method":"tools/call","params":{"name":"#)?;
     let name = scanner.plain_string()?;
-    scanner.literal(br#","arguments":{"query":"#)?;
+    scanner.literal(r#","arguments":{"query":"#)?;
     let query = scanner.plain_string()?;
-    scanner.literal(br#","limit":"#)?;
+    scanner.literal(r#","limit":"#)?;
     let limit = scanner.unsigned()?;
-    scanner.literal(br#","include_source":"#)?;
+    scanner.literal(r#","include_source":"#)?;
     let include_source = scanner.boolean()?;
-    scanner.literal(b"}}}")?;
+    scanner.literal("}}}")?;
     scanner.is_finished().then_some(Call {
         id,
         name,
@@ -33,7 +33,7 @@ fn canonical_call(input: &[u8]) -> Option<Call<'_>> {
 
 #[test]
 fn recognizes_the_complete_canonical_layout() {
-    let input = br#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}}"#;
+    let input = r#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}}"#;
     assert_eq!(
         canonical_call(input),
         Some(Call {
@@ -50,28 +50,24 @@ fn recognizes_the_complete_canonical_layout() {
 fn mismatch_is_a_fallback_signal_not_partial_success() {
     for (input, valid_general_json) in [
         (
-            br#"{"jsonrpc": "2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}}"#
-                .as_slice(),
+            r#"{"jsonrpc": "2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}}"#,
             true,
         ),
         (
-            br#"{"jsonrpc":"2.0","id":"req\u002d7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}}"#
-                .as_slice(),
+            r#"{"jsonrpc":"2.0","id":"req\u002d7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}}"#,
             true,
         ),
         (
-            br#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":020,"include_source":true}}}"#
-                .as_slice(),
+            r#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":020,"include_source":true}}}"#,
             false,
         ),
         (
-            br#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}} trailing"#
-                .as_slice(),
+            r#"{"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"query_graph","arguments":{"query":"entry points","limit":20,"include_source":true}}} trailing"#,
             false,
         ),
     ] {
         assert!(canonical_call(input).is_none());
-        let mut fallback = Cursor::from_slice(input);
+        let mut fallback = Cursor::from_str(input);
         let parsed = fallback.object(|_| Ok(()));
         if valid_general_json {
             parsed.unwrap();
@@ -85,7 +81,14 @@ fn mismatch_is_a_fallback_signal_not_partial_success() {
 #[test]
 fn invalid_utf8_never_becomes_a_borrowed_string() {
     let input = b"\"\xff\"";
-    let mut scanner = CanonicalScanner::new(input);
-    assert!(scanner.plain_string().is_none());
-    assert_eq!(scanner.remaining(), input);
+    assert!(CanonicalScanner::from_slice(input).is_none());
+}
+
+#[test]
+fn byte_input_is_validated_once_before_matching() {
+    let mut scanner = CanonicalScanner::from_slice(br#"{"enabled":true}"#).unwrap();
+    scanner.literal(r#"{"enabled":"#).unwrap();
+    assert_eq!(scanner.boolean(), Some(true));
+    scanner.literal("}").unwrap();
+    assert!(scanner.is_finished());
 }
