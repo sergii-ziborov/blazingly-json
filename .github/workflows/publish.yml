@@ -1,20 +1,99 @@
 name: Publish
 
 on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths:
+      - Cargo.toml
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: publish-crate-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   crates-io:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    environment: crates-io
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 2026-07-29
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Verify release identity
+        shell: bash
+        run: |
+          VERSION="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            [[ "$GITHUB_REF_NAME" == "v$VERSION" ]] || { echo "Tag $GITHUB_REF_NAME does not match crate version $VERSION" >&2; exit 1; }
+          else
+            [[ "$GITHUB_REF_NAME" == "main" ]] || { echo "Version releases may only run from main" >&2; exit 1; }
+          fi
+      - name: Quality gate
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked --all-targets --all-features
+          RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
       - name: Verify package
         run: cargo publish --locked --dry-run
-      - name: Publish to crates.io
-        run: cargo publish --locked
+      - name: Check whether this immutable version already exists
+        id: registry
+        shell: bash
+        run: |
+          VERSION="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if curl --fail --silent --show-error \
+            "https://crates.io/api/v1/crates/blazingly-json/$VERSION" |
+            jq -e --arg version "$VERSION" '.version.num == $version' >/dev/null; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish immutable crate
+        if: steps.registry.outputs.published != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked --no-verify
+      - name: Verify immutable crates.io artifact
+        shell: bash
+        run: |
+          VERSION="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          for attempt in $(seq 1 24); do
+            if curl --fail --silent --show-error \
+              --user-agent "weavatrix-release-verifier/1.0 (https://github.com/sergii-ziborov/blazingly-json)" \
+              "https://crates.io/api/v1/crates/blazingly-json/$VERSION" |
+              jq -e --arg version "$VERSION" '.version.num == $version' >/dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "blazingly-json@$VERSION did not become visible on crates.io" >&2
+          exit 1
+      - name: Create immutable GitHub release
+        if: steps.registry.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          TAG="v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            exit 0
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
+          else
+            gh release create "$TAG" --target "$GITHUB_SHA" --generate-notes --title "$TAG"
+          fi
