@@ -564,16 +564,44 @@ impl<'de> Deserializer<'de> {
     fn parse_escaped_string(&mut self, start: usize) -> Result<Cow<'de, str>> {
         let source = self.utf8_source()?;
         let prefix = &source[start..self.index];
-        let mut output = String::with_capacity(prefix.len() + 8);
+        // Raw span up to the closing quote bounds the decoded length (escape
+        // sequences only shrink), so the output never reallocates. A quote
+        // preceded by an odd backslash run is escaped; runs before distinct
+        // candidates are disjoint, keeping the scan linear.
+        let rest = &self.input[self.index..];
+        let mut probe = 0;
+        let estimated = loop {
+            let Some(found) = memchr::memchr(b'"', &rest[probe..]) else {
+                break rest.len();
+            };
+            let pos = probe + found;
+            let mut run = 0;
+            while run < pos && rest[pos - 1 - run] == b'\\' {
+                run += 1;
+            }
+            if run % 2 == 0 {
+                break pos;
+            }
+            probe = pos + 1;
+        };
+        let mut output = String::with_capacity(prefix.len() + estimated);
         output.push_str(prefix);
 
         loop {
-            match self.input.get(self.index).copied() {
-                Some(b'"') => {
+            let Some(relative) = find_string_special(&self.input[self.index..]) else {
+                return Err(self.error("unterminated string"));
+            };
+            if relative > 0 {
+                let segment_end = self.index + relative;
+                output.push_str(&source[self.index..segment_end]);
+                self.index = segment_end;
+            }
+            match self.input[self.index] {
+                b'"' => {
                     self.index += 1;
                     return Ok(Cow::Owned(output));
                 }
-                Some(b'\\') => {
+                b'\\' => {
                     self.index += 1;
                     let escaped = self
                         .input
@@ -620,21 +648,7 @@ impl<'de> Deserializer<'de> {
                         _ => return Err(self.error("invalid string escape")),
                     }
                 }
-                Some(byte) if byte < 0x20 => {
-                    return Err(self.error("control character in string"));
-                }
-                Some(_) => {
-                    let segment_start = self.index;
-                    while let Some(&byte) = self.input.get(self.index) {
-                        if matches!(byte, b'"' | b'\\') || byte < 0x20 {
-                            break;
-                        }
-                        self.index += 1;
-                    }
-                    let segment = &source[segment_start..self.index];
-                    output.push_str(segment);
-                }
-                None => return Err(self.error("unterminated string")),
+                _ => return Err(self.error("control character in string")),
             }
         }
     }
