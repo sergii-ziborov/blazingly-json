@@ -15,9 +15,11 @@ from changing protocol architecture: borrow the envelope, avoid a mutable DOM,
 serialize responses directly, and use an exact schema-aware recognizer where
 the producer emits a canonical layout.
 
-Current status: 0.1.0 release candidate. The crate passes differential/property tests,
-Rust 1.78, strict Clippy, rustdoc, packaging, Linux CI, and Windows CI. No
-production consumer has been switched yet.
+Current status: pre-1.0 and published. The crate passes differential and
+property tests, Rust 1.78, strict Clippy, rustdoc, packaging, Linux CI, and
+Windows CI. It is the engine every crate in the
+[Blazingly](https://github.com/sergii-ziborov/blazingly) framework encodes and
+decodes with, on every request that carries a JSON body.
 
 ## Performance summary
 
