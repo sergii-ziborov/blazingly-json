@@ -138,18 +138,10 @@ canonical and borrowed APIs exist to remove that ownership work.
 
 ## Usage
 
-Until the first crates.io release:
-
 ```toml
 [dependencies]
-blazingly-json = { git = "https://github.com/sergii-ziborov/blazingly-json" }
-serde = { version = "1", features = ["derive"] }
-```
-
-After publication, the Git dependency becomes:
-
-```toml
 blazingly-json = "0.1"
+serde = { version = "1", features = ["derive"] }
 ```
 
 ### Serde-compatible typed JSON
