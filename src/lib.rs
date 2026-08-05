@@ -8,6 +8,7 @@ mod number;
 mod raw;
 mod raw_value;
 mod ser;
+mod swar;
 pub mod value;
 mod value_de;
 

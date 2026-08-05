@@ -1,5 +1,6 @@
 use crate::raw::RAW_JSON_TOKEN;
 use crate::raw_value::RAW_VALUE_TOKEN;
+use crate::swar::find_string_special;
 use crate::{Error, Result};
 use serde::de::value::BorrowedStrDeserializer;
 use serde::de::{
@@ -12,9 +13,6 @@ use std::fmt;
 use std::str;
 
 const MAX_DEPTH: usize = 128;
-const STRING_WORD_BYTES: usize = std::mem::size_of::<u64>();
-const ONE_BYTES: u64 = u64::MAX / 255;
-const HIGH_BYTES: u64 = ONE_BYTES << 7;
 
 #[inline]
 fn compact_number_end(bytes: &[u8], mut index: usize) -> Option<usize> {
@@ -189,33 +187,6 @@ impl<'de> MapAccess<'de> for BorrowedRawMap<'de> {
             .ok_or_else(|| Error::message("raw value was already consumed"))?;
         seed.deserialize(BorrowedStrDeserializer::<Error>::new(raw))
     }
-}
-
-#[inline]
-fn find_string_special(bytes: &[u8]) -> Option<usize> {
-    let mut offset = 0;
-    let mut chunks = bytes.chunks_exact(STRING_WORD_BYTES);
-
-    for chunk in &mut chunks {
-        let word = u64::from_le_bytes(chunk.try_into().expect("u64-sized chunk"));
-        let contains_control = word.wrapping_sub(ONE_BYTES * 0x20) & !word;
-        let quote = word ^ (ONE_BYTES * u64::from(b'"'));
-        let contains_quote = quote.wrapping_sub(ONE_BYTES) & !quote;
-        let backslash = word ^ (ONE_BYTES * u64::from(b'\\'));
-        let contains_backslash = backslash.wrapping_sub(ONE_BYTES) & !backslash;
-        let special = (contains_control | contains_quote | contains_backslash) & HIGH_BYTES;
-
-        if special != 0 {
-            return Some(offset + special.trailing_zeros() as usize / 8);
-        }
-        offset += STRING_WORD_BYTES;
-    }
-
-    chunks
-        .remainder()
-        .iter()
-        .position(|&byte| byte < 0x20 || matches!(byte, b'"' | b'\\'))
-        .map(|relative| offset + relative)
 }
 
 /// A zero-copy Serde deserializer over a UTF-8 JSON slice.

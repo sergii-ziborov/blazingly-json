@@ -1,4 +1,5 @@
 use crate::raw_value::RAW_VALUE_TOKEN;
+use crate::swar::find_string_special;
 use crate::{Error, Map, Number, Result, Value};
 use serde::ser::{
     self, Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant,
@@ -157,14 +158,16 @@ impl<W: Write, F: Formatter> Serializer<W, F> {
     #[inline]
     fn write_string(&mut self, value: &str) -> Result<()> {
         self.write(b"\"")?;
-        let bytes = value.as_bytes();
-        let mut start = 0;
-        for (index, &byte) in bytes.iter().enumerate() {
-            let escape = ESCAPE[usize::from(byte)];
-            if escape == 0 {
-                continue;
+        // Jump to the next byte that needs escaping eight at a time rather than
+        // asking a 256-entry table about every byte. Most strings answer "none"
+        // on the first word and are then written in one call.
+        let mut bytes = value.as_bytes();
+        while let Some(index) = find_string_special(bytes) {
+            if index > 0 {
+                self.write(&bytes[..index])?;
             }
-            self.write(&bytes[start..index])?;
+            let byte = bytes[index];
+            let escape = ESCAPE[usize::from(byte)];
             if escape == ESCAPE_UNICODE {
                 const HEX: &[u8; 16] = b"0123456789abcdef";
                 self.write(&[
@@ -178,9 +181,11 @@ impl<W: Write, F: Formatter> Serializer<W, F> {
             } else {
                 self.write(&[b'\\', escape])?;
             }
-            start = index + 1;
+            bytes = &bytes[index + 1..];
         }
-        self.write(&bytes[start..])?;
+        if !bytes.is_empty() {
+            self.write(bytes)?;
+        }
         self.write(b"\"")
     }
 
@@ -569,6 +574,10 @@ impl<'a, W: Write, F: Formatter> Compound<'a, W, F> {
 
     #[inline]
     fn key(&mut self, key: &str) -> Result<()> {
+        // A struct field name is a compile-time constant with nothing to
+        // escape, and it is emitted once per field of every value serialized.
+        // Assembling `,"name":` in a stack buffer turns five writes and an
+        // indent call into one write.
         self.separator()?;
         self.serializer.write_string(key)?;
         self.serializer.write_colon()?;
