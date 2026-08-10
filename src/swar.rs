@@ -6,7 +6,9 @@
 //! walked one byte at a time through a 256-entry table until this module
 //! existed to be shared.
 
-const WORD_BYTES: usize = size_of::<u64>();
+// Spelled out rather than taken from the prelude: `size_of` only entered it in
+// Rust 1.80, and this crate declares 1.78.
+const WORD_BYTES: usize = core::mem::size_of::<u64>();
 const ONE_BYTES: u64 = u64::MAX / 255;
 const HIGH_BYTES: u64 = ONE_BYTES << 7;
 
