@@ -475,6 +475,33 @@ impl<'de> Deserializer<'de> {
     }
 
     #[inline]
+    fn end_container(
+        &mut self,
+        closing: u8,
+        trailing_comma: &'static str,
+        unexpected_end: &'static str,
+    ) -> Result<()> {
+        self.skip_whitespace();
+        match self.input.get(self.index) {
+            Some(byte) if *byte == closing => {
+                self.index += 1;
+                Ok(())
+            }
+            Some(b',') => {
+                self.index += 1;
+                self.skip_whitespace();
+                if self.input.get(self.index) == Some(&closing) {
+                    Err(self.error(trailing_comma))
+                } else {
+                    Err(self.error("trailing characters"))
+                }
+            }
+            Some(_) => Err(self.error("trailing characters")),
+            None => Err(self.error(unexpected_end)),
+        }
+    }
+
+    #[inline]
     fn parse_literal(&mut self, literal: &[u8]) -> Result<()> {
         self.skip_whitespace();
         let end = self.index.saturating_add(literal.len());
@@ -1370,10 +1397,12 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             first: true,
             finished: false,
         });
-        if value.is_err() {
-            self.leave();
+        let end = self.end_container(b']', "trailing comma in array", "unexpected end of array");
+        self.leave();
+        match (value, end) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) | (_, Err(error)) => Err(error),
         }
-        value
     }
 
     fn deserialize_tuple<V: Visitor<'de>>(self, _length: usize, visitor: V) -> Result<V::Value> {
@@ -1484,8 +1513,6 @@ impl<'de> SeqAccess<'de> for SliceSeqAccess<'_, 'de> {
         }
         self.deserializer.skip_whitespace();
         if self.deserializer.input.get(self.deserializer.index) == Some(&b']') {
-            self.deserializer.index += 1;
-            self.deserializer.leave();
             self.finished = true;
             return Ok(None);
         }

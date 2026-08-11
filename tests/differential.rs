@@ -119,6 +119,42 @@ fn typed_float_parser_preserves_json_syntax_rules() {
 }
 
 #[test]
+fn fixed_size_float_array_consumes_its_closing_delimiter() {
+    #[derive(Debug, Deserialize)]
+    struct Point {
+        coordinates: [f32; 4],
+    }
+
+    let expected_bits = [1.0_f32, 2.0, 3.0, 4.0].map(f32::to_bits);
+    assert_eq!(
+        from_str::<[f32; 4]>("[1,2,3,4]").unwrap().map(f32::to_bits),
+        expected_bits
+    );
+    assert_eq!(
+        from_slice::<[f32; 4]>(b" \n[1, 2, 3, 4]\t")
+            .unwrap()
+            .map(f32::to_bits),
+        expected_bits
+    );
+
+    assert_eq!(
+        from_str::<Point>(r#"{"coordinates":[1,2,3,4]}"#)
+            .unwrap()
+            .coordinates
+            .map(f32::to_bits),
+        expected_bits
+    );
+
+    for invalid in ["[1,2,3]", "[1,2,3,4,5]", "[1,2,3,4,]"] {
+        assert!(from_str::<[f32; 4]>(invalid).is_err(), "input: {invalid}");
+        assert!(
+            serde_json::from_str::<[f32; 4]>(invalid).is_err(),
+            "serde_json input: {invalid}"
+        );
+    }
+}
+
+#[test]
 fn typed_integer_boundaries_match_serde_json() {
     for fixture in ["-9223372036854775808", "-1", "0", "9223372036854775807"] {
         assert_eq!(
